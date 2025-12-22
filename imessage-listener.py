@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import json
 import pathlib
 import sqlite3
 import subprocess
@@ -11,6 +12,9 @@ from typing import Optional
 
 import requests
 
+# NEW: geocoding helpers
+from geocode_utils import AmbiguousLocation, GeocodeError, GeoCandidate, pick_best_or_raise, resolve_location_to_candidates
+
 # ------------ paths / config ------------
 
 STATE_FILE = pathlib.Path.home() / ".imessage_autoreply_last_rowid"
@@ -21,9 +25,8 @@ PROFILE_DB = pathlib.Path.home() / ".imessage_autoreply_profiles.sqlite3"
 POLL_SECONDS = 3
 
 # NWS asks for a descriptive UA with contact info
-NWS_USER_AGENT = "imessage-autoreply-bot/1.2 (claudep; contact: you@example.com)"
+NWS_USER_AGENT = "imessage-autoreply-bot/1.3 (claudep; contact: you@example.com)"
 
-# Consider someone "back" if they've been gone at least this long
 WELCOME_BACK_GAP_SECONDS = 15 * 60  # 15 minutes
 
 # ------------ AppleScript helpers ------------
@@ -43,7 +46,6 @@ on run argv
 end run
 '''
 
-# Returns best match; may be empty string.
 CONTACT_NAME_SCRIPT = r'''
 on run argv
   if (count of argv) < 1 then return ""
@@ -98,7 +100,7 @@ def lookup_contact_name(handle_id: str) -> str:
     except Exception:
         return ""
 
-# ------------ your greeting function (with fix) ------------
+# ------------ greeting ------------
 
 def time_of_day_greeting(dt: datetime) -> str:
     h = dt.hour
@@ -106,7 +108,7 @@ def time_of_day_greeting(dt: datetime) -> str:
         return "Good morning!"
     if 12 <= h < 17:
         return "Good afternoon!"
-    if 17 <= h < 24:  # NOTE: fixed from < 00
+    if 17 <= h < 24:
         return "Good evening!"
     return "Good god it's late!"
 
@@ -163,7 +165,7 @@ def get_latest_incoming_since(last_rowid: int) -> Optional[Incoming]:
         text=str(row["text"] or "").strip(),
     )
 
-# ------------ your profile DB + conversation state ------------
+# ------------ profile DB ------------
 
 def db_connect() -> sqlite3.Connection:
     con = sqlite3.connect(PROFILE_DB)
@@ -200,9 +202,14 @@ def db_init() -> None:
 
         CREATE TABLE IF NOT EXISTS convo_state (
           handle_id TEXT PRIMARY KEY,
-          state TEXT NOT NULL,              -- 'need_first' | 'need_last' | 'need_location' | 'ready'
+          state TEXT NOT NULL,              -- need_first | need_last | need_location | need_location_choice | ready
           last_incoming_at TEXT,
           last_welcome_at TEXT,
+
+          -- NEW: pending disambiguation choices (JSON list of {label, lat, lon, source})
+          pending_location_query TEXT,
+          pending_location_choices TEXT,
+
           updated_at TEXT NOT NULL,
           FOREIGN KEY(handle_id) REFERENCES person(handle_id) ON DELETE CASCADE
         );
@@ -226,8 +233,8 @@ def ensure_person_row(handle_id: str) -> None:
 
     con.execute(
         """
-        INSERT INTO convo_state(handle_id, state, last_incoming_at, last_welcome_at, updated_at)
-        VALUES(?, 'need_first', NULL, NULL, ?)
+        INSERT INTO convo_state(handle_id, state, last_incoming_at, last_welcome_at, pending_location_query, pending_location_choices, updated_at)
+        VALUES(?, 'need_first', NULL, NULL, NULL, NULL, ?)
         ON CONFLICT(handle_id) DO NOTHING
         """,
         (handle_id, ts),
@@ -298,16 +305,29 @@ def get_person(handle_id: str) -> dict:
 def get_convo_meta(handle_id: str) -> dict:
     con = db_connect()
     row = con.execute(
-        "SELECT last_incoming_at, last_welcome_at FROM convo_state WHERE handle_id = ?",
+        """
+        SELECT last_incoming_at, last_welcome_at,
+               pending_location_query, pending_location_choices
+        FROM convo_state WHERE handle_id = ?
+        """,
         (handle_id,),
     ).fetchone()
     con.close()
     return {
         "last_incoming_at": row[0] if row else None,
         "last_welcome_at": row[1] if row else None,
+        "pending_location_query": row[2] if row else None,
+        "pending_location_choices": row[3] if row else None,
     }
 
-def set_convo_meta(handle_id: str, *, last_incoming_at: str | None = None, last_welcome_at: str | None = None) -> None:
+def set_convo_meta(
+    handle_id: str,
+    *,
+    last_incoming_at: str | None = None,
+    last_welcome_at: str | None = None,
+    pending_location_query: str | None = None,
+    pending_location_choices: str | None = None,
+) -> None:
     sets = []
     vals: list[str] = []
     if last_incoming_at is not None:
@@ -316,6 +336,12 @@ def set_convo_meta(handle_id: str, *, last_incoming_at: str | None = None, last_
     if last_welcome_at is not None:
         sets.append("last_welcome_at = ?")
         vals.append(last_welcome_at)
+    if pending_location_query is not None:
+        sets.append("pending_location_query = ?")
+        vals.append(pending_location_query)
+    if pending_location_choices is not None:
+        sets.append("pending_location_choices = ?")
+        vals.append(pending_location_choices)
     if not sets:
         return
     sets.append("updated_at = ?")
@@ -327,8 +353,10 @@ def set_convo_meta(handle_id: str, *, last_incoming_at: str | None = None, last_
     con.commit()
     con.close()
 
+def clear_pending_location(handle_id: str) -> None:
+    set_convo_meta(handle_id, pending_location_query="", pending_location_choices="")
+
 def display_first_name(handle_id: str) -> str:
-    # Prefer stored first name; fallback to Contacts first token; else "there"
     p = get_person(handle_id)
     if p.get("first_name"):
         return str(p["first_name"]).strip()
@@ -337,7 +365,7 @@ def display_first_name(handle_id: str) -> str:
         return cn.strip().split()[0]
     return "there"
 
-# ------------ “how long has it been?” formatter ------------
+# ------------ elapsed formatter ------------
 
 def human_elapsed(seconds: int) -> str:
     if seconds < 0:
@@ -358,38 +386,7 @@ def human_elapsed(seconds: int) -> str:
 
     return ", ".join(parts) if parts else "less than a minute"
 
-# ------------ Census geocode -> NWS forecast ------------
-
-def census_geocode_city(loc: str) -> tuple[float, float]:
-    """
-    More forgiving:
-      - tries loc as-is
-      - tries loc + ', USA'
-      - tries normalizing whitespace
-    """
-    loc = " ".join((loc or "").strip().split())
-    if not loc:
-        raise ValueError("Empty location")
-
-    candidates = [loc]
-    if "usa" not in loc.lower() and "united states" not in loc.lower():
-        candidates.append(f"{loc}, USA")
-        candidates.append(f"{loc} United States")
-
-    url = "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress"
-    for addr in candidates:
-        params = {"address": addr, "benchmark": "Public_AR_Current", "format": "json"}
-        r = requests.get(url, params=params, timeout=10)
-        r.raise_for_status()
-        data = r.json()
-        matches = (data.get("result", {}) or {}).get("addressMatches", []) or []
-        if matches:
-            coords = matches[0].get("coordinates") or {}
-            lon = float(coords["x"])
-            lat = float(coords["y"])
-            return lat, lon
-
-    raise ValueError(f"No Census geocode match for: {loc}")
+# ------------ NWS forecast ------------
 
 def nws_forecast_one_liner(lat: float, lon: float) -> str:
     headers = {
@@ -423,13 +420,17 @@ def nws_forecast_one_liner(lat: float, lon: float) -> str:
 # ------------ commands / parsing ------------
 
 HELP_TEXT = """Commands:
-• help / ?              Show this help
-• weather / wx          Get your current forecast (based on saved location)
-• I'm in <place> now    Update your location and get forecast
+• help / ?                 Show this help
+• weather / wx             Get your forecast (based on saved location)
+• I'm in <place> now       Update your location and get forecast
+• <City, ST> or <ZIP>      Set your location during setup
+If I find multiple matches, I’ll ask you to reply with a number.
 Examples:
 • weather
 • wx
 • I'm in Davis, CA now
+• 95616
+• Paris, France
 """
 
 WEATHER_COMMANDS = {"weather", "wx", "forecast", "temp"}
@@ -438,6 +439,8 @@ IN_NOW_RE = re.compile(
     r"""^\s*(?:i'?m|i\s+am)?\s*in\s+(?P<loc>.+?)\s+now\s*$""",
     re.IGNORECASE,
 )
+
+PICK_RE = re.compile(r"^\s*(?:use|pick|choose)?\s*(\d{1,2})\s*$", re.IGNORECASE)
 
 def normalize_text(s: str) -> str:
     return " ".join((s or "").strip().split())
@@ -457,13 +460,69 @@ def extract_in_now_location(text: str) -> str | None:
     loc = normalize_text(m.group("loc"))
     return loc if loc else None
 
+def parse_pick_number(text: str) -> int | None:
+    m = PICK_RE.match(text or "")
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except Exception:
+        return None
+
+# ------------ disambiguation UX ------------
+
+def format_choice_list(query: str, choices: list[GeoCandidate]) -> str:
+    lines = [f'I found multiple matches for “{query}”. Reply with a number:']
+    for i, c in enumerate(choices[:5], start=1):
+        lines.append(f"{i}) {c.label}")
+    lines.append("")
+    lines.append("Tip: You can also send City, ST (e.g., Davis, CA) or a ZIP code.")
+    return "\n".join(lines)
+
+def store_pending_choices(handle_id: str, query: str, choices: list[GeoCandidate]) -> None:
+    blob = json.dumps([c.__dict__ for c in choices[:5]])
+    set_convo_meta(handle_id, pending_location_query=query, pending_location_choices=blob)
+    set_state(handle_id, "need_location_choice")
+
+def load_pending_choices(handle_id: str) -> tuple[str, list[GeoCandidate]]:
+    meta = get_convo_meta(handle_id)
+    q = meta.get("pending_location_query") or ""
+    raw = meta.get("pending_location_choices") or "[]"
+    try:
+        arr = json.loads(raw) if raw else []
+    except Exception:
+        arr = []
+    out: list[GeoCandidate] = []
+    for item in arr:
+        try:
+            out.append(GeoCandidate(label=item["label"], lat=float(item["lat"]), lon=float(item["lon"]), source=item.get("source", "unknown")))
+        except Exception:
+            continue
+    return q, out
+
 # ------------ conversation logic ------------
 
-def set_location(handle_id: str, loc: str) -> tuple[float, float]:
-    lat, lon = census_geocode_city(loc)
-    update_person(handle_id, location_text=loc, lat=lat, lon=lon)
+def set_location_direct(handle_id: str, label: str, lat: float, lon: float) -> None:
+    update_person(handle_id, location_text=label, lat=lat, lon=lon)
+    clear_pending_location(handle_id)
     set_state(handle_id, "ready")
-    return lat, lon
+
+def set_location_from_text_with_disambiguation(handle_id: str, raw_loc: str) -> tuple[float, float, str]:
+    """
+    Try to geocode. If ambiguous, store choices and prompt user.
+    Returns (lat, lon, label) if set; raises AmbiguousLocation to trigger prompt.
+    """
+    try:
+        cand = pick_best_or_raise(raw_loc)
+        set_location_direct(handle_id, cand.label, cand.lat, cand.lon)
+        return cand.lat, cand.lon, cand.label
+    except AmbiguousLocation as amb:
+        store_pending_choices(handle_id, amb.query, amb.candidates)
+        raise
+    except GeocodeError as e:
+        raise
+    except Exception as e:
+        raise GeocodeError(str(e)) from e
 
 def reply_weather(handle_id: str, loc: str, lat: float, lon: float) -> None:
     first = display_first_name(handle_id)
@@ -485,11 +544,9 @@ def maybe_send_welcome_back(handle_id: str) -> None:
     now = datetime.now(timezone.utc)
     gap = int((now - last_incoming).total_seconds())
 
-    # Only welcome if they've been away long enough, and we haven't welcomed since returning.
     if gap < WELCOME_BACK_GAP_SECONDS:
         return
 
-    # If we already welcomed after that last_incoming, skip.
     if last_welcome and last_welcome > last_incoming:
         return
 
@@ -501,39 +558,68 @@ def maybe_send_welcome_back(handle_id: str) -> None:
 def handle_incoming(msg: Incoming) -> None:
     ensure_person_row(msg.handle_id)
 
-    # track last-seen times (for "how long has it been?")
-    person = get_person(msg.handle_id)
-    prev_last_seen = parse_iso(person.get("last_seen_at") or "")
+    # Update last-seen times
     update_person(msg.handle_id, last_seen_at=now_iso())
 
-    # convo meta: update last incoming (but after we compute any gap message)
-    # We'll compute welcome-back using convo_state.last_incoming_at, not person.last_seen_at.
     maybe_send_welcome_back(msg.handle_id)
     set_convo_meta(msg.handle_id, last_incoming_at=now_iso())
 
     if not msg.text:
         return
 
+    # Global help
     if is_help(msg.text):
         send_imessage(msg.handle_id, HELP_TEXT)
+        return
+
+    # If we're waiting for a location choice, handle it first
+    state = get_state(msg.handle_id)
+    if state == "need_location_choice":
+        pick = parse_pick_number(msg.text)
+        q, choices = load_pending_choices(msg.handle_id)
+        if pick is None or pick < 1 or pick > len(choices):
+            # Let them also override by sending a new location text
+            # Try treat message as new location input; if ambiguous again, it'll prompt.
+            raw_try = normalize_text(msg.text)
+            if raw_try:
+                try:
+                    lat, lon, label = set_location_from_text_with_disambiguation(msg.handle_id, raw_try)
+                    send_imessage(msg.handle_id, f"Saved your location as: {label}. Text “weather” or “wx” anytime.")
+                    return
+                except AmbiguousLocation as amb:
+                    send_imessage(msg.handle_id, format_choice_list(amb.query, amb.candidates))
+                    return
+                except Exception:
+                    pass
+
+            send_imessage(msg.handle_id, f"Please reply with a number 1–{max(1,len(choices))} (or send City, ST / ZIP).")
+            return
+
+        chosen = choices[pick - 1]
+        set_location_direct(msg.handle_id, chosen.label, chosen.lat, chosen.lon)
+        # If they were updating location via "I'm in ... now" we’ll just confirm + forecast on next command.
+        send_imessage(msg.handle_id, f"Got it — saved your location as: {chosen.label}. Text “weather” or “wx” anytime.")
         return
 
     # "I'm in <location> now" always works
     in_now_loc = extract_in_now_location(msg.text)
     if in_now_loc:
         try:
-            lat, lon = set_location(msg.handle_id, in_now_loc)
-        except Exception as e:
-            send_imessage(msg.handle_id, f"Sorry — I couldn’t find that location. Try: “Davis, CA”. ({e})")
+            lat, lon, label = set_location_from_text_with_disambiguation(msg.handle_id, in_now_loc)
+        except AmbiguousLocation as amb:
+            send_imessage(msg.handle_id, format_choice_list(amb.query, amb.candidates))
             return
-        reply_weather(msg.handle_id, in_now_loc, lat, lon)
+        except Exception as e:
+            send_imessage(msg.handle_id, f"Sorry — I couldn’t find that location. Try: “Davis, CA” or a ZIP code. ({e})")
+            return
+
+        reply_weather(msg.handle_id, label, lat, lon)
         return
 
+    # Onboarding state machine
     state = get_state(msg.handle_id)
 
-    # Onboarding
     if state == "need_first":
-        # If Contacts can tell us, set first/last (best effort), skip questions
         cn = lookup_contact_name(msg.handle_id)
         if cn:
             parts = cn.split()
@@ -541,7 +627,7 @@ def handle_incoming(msg: Incoming) -> None:
             last = " ".join(parts[1:]) if len(parts) > 1 else ""
             update_person(msg.handle_id, first_name=first, last_name=last)
             set_state(msg.handle_id, "need_location")
-            send_imessage(msg.handle_id, f"Hi {first}! What city and state are you in? (e.g., Davis, CA)")
+            send_imessage(msg.handle_id, f"Hi {first}! What city and state are you in? (e.g., Davis, CA — or send a ZIP)")
             return
 
         send_imessage(msg.handle_id, "Hi! What’s your first name?")
@@ -549,10 +635,6 @@ def handle_incoming(msg: Incoming) -> None:
         return
 
     if state == "need_last":
-        # We got first name in previous message? Actually state machine wants:
-        # - first message after need_first sets state need_last, so this message is first name.
-        # We'll store it, then ask last name, then move to need_location.
-        # To keep it simple: if first_name is empty, treat msg as first; else treat as last.
         p = get_person(msg.handle_id)
         if not p.get("first_name"):
             first = normalize_text(msg.text)
@@ -564,19 +646,22 @@ def handle_incoming(msg: Incoming) -> None:
             update_person(msg.handle_id, last_name=last)
             set_state(msg.handle_id, "need_location")
             first = display_first_name(msg.handle_id)
-            send_imessage(msg.handle_id, f"Thanks {first}! What city and state are you in? (e.g., Davis, CA)")
+            send_imessage(msg.handle_id, f"Thanks {first}! What city and state are you in? (e.g., Davis, CA — or send a ZIP)")
             return
 
     if state == "need_location":
         loc = normalize_text(msg.text)
         try:
-            set_location(msg.handle_id, loc)
+            lat, lon, label = set_location_from_text_with_disambiguation(msg.handle_id, loc)
+        except AmbiguousLocation as amb:
+            send_imessage(msg.handle_id, format_choice_list(amb.query, amb.candidates))
+            return
         except Exception as e:
-            send_imessage(msg.handle_id, f"Sorry — I couldn’t find that location. Try: “Davis, CA”. ({e})")
+            send_imessage(msg.handle_id, f"Sorry — I couldn’t find that location. Try: “Davis, CA” or a ZIP code. ({e})")
             return
 
         first = display_first_name(msg.handle_id)
-        send_imessage(msg.handle_id, f"Thanks {first}! Saved your location as: {loc}. Text “weather” or “wx” anytime.")
+        send_imessage(msg.handle_id, f"Thanks {first}! Saved your location as: {label}. Text “weather” or “wx” anytime.")
         return
 
     # ready state:
@@ -587,12 +672,25 @@ def handle_incoming(msg: Incoming) -> None:
         lon = p.get("lon")
         if not loc or lat is None or lon is None:
             set_state(msg.handle_id, "need_location")
-            send_imessage(msg.handle_id, f"What city and state are you in, {display_first_name(msg.handle_id)}? (e.g., Davis, CA)")
+            send_imessage(msg.handle_id, f"What city and state are you in, {display_first_name(msg.handle_id)}? (e.g., Davis, CA — or send a ZIP)")
             return
         reply_weather(msg.handle_id, loc, float(lat), float(lon))
         return
 
-    # otherwise ignore
+    # Optional convenience: if user just sends a location while ready, treat it as location update
+    # (This is surprisingly nice UX.)
+    raw = normalize_text(msg.text)
+    if raw and ("," in raw or raw.isdigit()):
+        try:
+            lat, lon, label = set_location_from_text_with_disambiguation(msg.handle_id, raw)
+            send_imessage(msg.handle_id, f"Updated your location to: {label}. Text “weather” or “wx” anytime.")
+            return
+        except AmbiguousLocation as amb:
+            send_imessage(msg.handle_id, format_choice_list(amb.query, amb.candidates))
+            return
+        except Exception:
+            pass
+
     return
 
 # ------------ main loop ------------
