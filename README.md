@@ -23,3 +23,5 @@ A Python and AppleScript project for macOS.
 
 MIT License - see [LICENSE](LICENSE) file for details.
 
+
+
