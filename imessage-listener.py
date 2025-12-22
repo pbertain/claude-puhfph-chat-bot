@@ -12,8 +12,7 @@ from typing import Optional
 
 import requests
 
-# NEW: geocoding helpers
-from geocode_utils import AmbiguousLocation, GeocodeError, GeoCandidate, pick_best_or_raise, resolve_location_to_candidates
+from geocode_utils import AmbiguousLocation, GeocodeError, GeoCandidate, pick_best_or_raise
 
 # ------------ paths / config ------------
 
@@ -24,10 +23,11 @@ PROFILE_DB = pathlib.Path.home() / ".imessage_autoreply_profiles.sqlite3"
 
 POLL_SECONDS = 3
 
-# NWS asks for a descriptive UA with contact info
 NWS_USER_AGENT = "imessage-autoreply-bot/1.3 (claudep; contact: you@example.com)"
-
 WELCOME_BACK_GAP_SECONDS = 15 * 60  # 15 minutes
+
+# SQLite tuning
+SQLITE_BUSY_TIMEOUT_MS = 5000
 
 # ------------ AppleScript helpers ------------
 
@@ -168,8 +168,12 @@ def get_latest_incoming_since(last_rowid: int) -> Optional[Incoming]:
 # ------------ profile DB ------------
 
 def db_connect() -> sqlite3.Connection:
-    con = sqlite3.connect(PROFILE_DB)
+    con = sqlite3.connect(PROFILE_DB, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)
+    # lock handling
+    con.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS};")
+    # WAL helps concurrency; NORMAL reduces fsync pressure
     con.execute("PRAGMA journal_mode=WAL;")
+    con.execute("PRAGMA synchronous=NORMAL;")
     con.execute("PRAGMA foreign_keys=ON;")
     return con
 
@@ -184,8 +188,16 @@ def parse_iso(ts: str) -> Optional[datetime]:
     except Exception:
         return None
 
-def db_init() -> None:
-    con = db_connect()
+def table_has_column(con: sqlite3.Connection, table: str, col: str) -> bool:
+    rows = con.execute(f"PRAGMA table_info({table});").fetchall()
+    return any(r[1] == col for r in rows)
+
+def migrate_schema(con: sqlite3.Connection) -> None:
+    """
+    Safe on existing DBs:
+    - creates tables if missing
+    - adds new columns if missing (ALTER TABLE)
+    """
     con.executescript(
         """
         CREATE TABLE IF NOT EXISTS person (
@@ -202,19 +214,24 @@ def db_init() -> None:
 
         CREATE TABLE IF NOT EXISTS convo_state (
           handle_id TEXT PRIMARY KEY,
-          state TEXT NOT NULL,              -- need_first | need_last | need_location | need_location_choice | ready
+          state TEXT NOT NULL,
           last_incoming_at TEXT,
           last_welcome_at TEXT,
-
-          -- NEW: pending disambiguation choices (JSON list of {label, lat, lon, source})
-          pending_location_query TEXT,
-          pending_location_choices TEXT,
-
           updated_at TEXT NOT NULL,
           FOREIGN KEY(handle_id) REFERENCES person(handle_id) ON DELETE CASCADE
         );
         """
     )
+
+    # Add new columns if they don't exist (older DB)
+    if not table_has_column(con, "convo_state", "pending_location_query"):
+        con.execute("ALTER TABLE convo_state ADD COLUMN pending_location_query TEXT;")
+    if not table_has_column(con, "convo_state", "pending_location_choices"):
+        con.execute("ALTER TABLE convo_state ADD COLUMN pending_location_choices TEXT;")
+
+def db_init() -> None:
+    con = db_connect()
+    migrate_schema(con)
     con.commit()
     con.close()
 
@@ -233,7 +250,8 @@ def ensure_person_row(handle_id: str) -> None:
 
     con.execute(
         """
-        INSERT INTO convo_state(handle_id, state, last_incoming_at, last_welcome_at, pending_location_query, pending_location_choices, updated_at)
+        INSERT INTO convo_state(handle_id, state, last_incoming_at, last_welcome_at,
+                                pending_location_query, pending_location_choices, updated_at)
         VALUES(?, 'need_first', NULL, NULL, NULL, NULL, ?)
         ON CONFLICT(handle_id) DO NOTHING
         """,
@@ -307,7 +325,7 @@ def get_convo_meta(handle_id: str) -> dict:
     row = con.execute(
         """
         SELECT last_incoming_at, last_welcome_at,
-               pending_location_query, pending_location_choices
+               COALESCE(pending_location_query,''), COALESCE(pending_location_choices,'')
         FROM convo_state WHERE handle_id = ?
         """,
         (handle_id,),
@@ -316,8 +334,8 @@ def get_convo_meta(handle_id: str) -> dict:
     return {
         "last_incoming_at": row[0] if row else None,
         "last_welcome_at": row[1] if row else None,
-        "pending_location_query": row[2] if row else None,
-        "pending_location_choices": row[3] if row else None,
+        "pending_location_query": row[2] if row else "",
+        "pending_location_choices": row[3] if row else "",
     }
 
 def set_convo_meta(
@@ -423,10 +441,8 @@ HELP_TEXT = """Commands:
 • help / ?                 Show this help
 • weather / wx             Get your forecast (based on saved location)
 • I'm in <place> now       Update your location and get forecast
-• <City, ST> or <ZIP>      Set your location during setup
 If I find multiple matches, I’ll ask you to reply with a number.
 Examples:
-• weather
 • wx
 • I'm in Davis, CA now
 • 95616
@@ -469,8 +485,6 @@ def parse_pick_number(text: str) -> int | None:
     except Exception:
         return None
 
-# ------------ disambiguation UX ------------
-
 def format_choice_list(query: str, choices: list[GeoCandidate]) -> str:
     lines = [f'I found multiple matches for “{query}”. Reply with a number:']
     for i, c in enumerate(choices[:5], start=1):
@@ -495,7 +509,14 @@ def load_pending_choices(handle_id: str) -> tuple[str, list[GeoCandidate]]:
     out: list[GeoCandidate] = []
     for item in arr:
         try:
-            out.append(GeoCandidate(label=item["label"], lat=float(item["lat"]), lon=float(item["lon"]), source=item.get("source", "unknown")))
+            out.append(
+                GeoCandidate(
+                    label=item["label"],
+                    lat=float(item["lat"]),
+                    lon=float(item["lon"]),
+                    source=item.get("source", "unknown"),
+                )
+            )
         except Exception:
             continue
     return q, out
@@ -508,10 +529,6 @@ def set_location_direct(handle_id: str, label: str, lat: float, lon: float) -> N
     set_state(handle_id, "ready")
 
 def set_location_from_text_with_disambiguation(handle_id: str, raw_loc: str) -> tuple[float, float, str]:
-    """
-    Try to geocode. If ambiguous, store choices and prompt user.
-    Returns (lat, lon, label) if set; raises AmbiguousLocation to trigger prompt.
-    """
     try:
         cand = pick_best_or_raise(raw_loc)
         set_location_direct(handle_id, cand.label, cand.lat, cand.lon)
@@ -519,7 +536,7 @@ def set_location_from_text_with_disambiguation(handle_id: str, raw_loc: str) -> 
     except AmbiguousLocation as amb:
         store_pending_choices(handle_id, amb.query, amb.candidates)
         raise
-    except GeocodeError as e:
+    except GeocodeError:
         raise
     except Exception as e:
         raise GeocodeError(str(e)) from e
@@ -557,8 +574,6 @@ def maybe_send_welcome_back(handle_id: str) -> None:
 
 def handle_incoming(msg: Incoming) -> None:
     ensure_person_row(msg.handle_id)
-
-    # Update last-seen times
     update_person(msg.handle_id, last_seen_at=now_iso())
 
     maybe_send_welcome_back(msg.handle_id)
@@ -567,41 +582,23 @@ def handle_incoming(msg: Incoming) -> None:
     if not msg.text:
         return
 
-    # Global help
     if is_help(msg.text):
         send_imessage(msg.handle_id, HELP_TEXT)
         return
 
-    # If we're waiting for a location choice, handle it first
+    # Disambiguation flow
     state = get_state(msg.handle_id)
     if state == "need_location_choice":
         pick = parse_pick_number(msg.text)
         q, choices = load_pending_choices(msg.handle_id)
         if pick is None or pick < 1 or pick > len(choices):
-            # Let them also override by sending a new location text
-            # Try treat message as new location input; if ambiguous again, it'll prompt.
-            raw_try = normalize_text(msg.text)
-            if raw_try:
-                try:
-                    lat, lon, label = set_location_from_text_with_disambiguation(msg.handle_id, raw_try)
-                    send_imessage(msg.handle_id, f"Saved your location as: {label}. Text “weather” or “wx” anytime.")
-                    return
-                except AmbiguousLocation as amb:
-                    send_imessage(msg.handle_id, format_choice_list(amb.query, amb.candidates))
-                    return
-                except Exception:
-                    pass
-
             send_imessage(msg.handle_id, f"Please reply with a number 1–{max(1,len(choices))} (or send City, ST / ZIP).")
             return
-
         chosen = choices[pick - 1]
         set_location_direct(msg.handle_id, chosen.label, chosen.lat, chosen.lon)
-        # If they were updating location via "I'm in ... now" we’ll just confirm + forecast on next command.
         send_imessage(msg.handle_id, f"Got it — saved your location as: {chosen.label}. Text “weather” or “wx” anytime.")
         return
 
-    # "I'm in <location> now" always works
     in_now_loc = extract_in_now_location(msg.text)
     if in_now_loc:
         try:
@@ -616,7 +613,7 @@ def handle_incoming(msg: Incoming) -> None:
         reply_weather(msg.handle_id, label, lat, lon)
         return
 
-    # Onboarding state machine
+    # Onboarding
     state = get_state(msg.handle_id)
 
     if state == "need_first":
@@ -664,7 +661,7 @@ def handle_incoming(msg: Incoming) -> None:
         send_imessage(msg.handle_id, f"Thanks {first}! Saved your location as: {label}. Text “weather” or “wx” anytime.")
         return
 
-    # ready state:
+    # ready
     if is_weather_cmd(msg.text):
         p = get_person(msg.handle_id)
         loc = p.get("location_text")
@@ -676,22 +673,6 @@ def handle_incoming(msg: Incoming) -> None:
             return
         reply_weather(msg.handle_id, loc, float(lat), float(lon))
         return
-
-    # Optional convenience: if user just sends a location while ready, treat it as location update
-    # (This is surprisingly nice UX.)
-    raw = normalize_text(msg.text)
-    if raw and ("," in raw or raw.isdigit()):
-        try:
-            lat, lon, label = set_location_from_text_with_disambiguation(msg.handle_id, raw)
-            send_imessage(msg.handle_id, f"Updated your location to: {label}. Text “weather” or “wx” anytime.")
-            return
-        except AmbiguousLocation as amb:
-            send_imessage(msg.handle_id, format_choice_list(amb.query, amb.candidates))
-            return
-        except Exception:
-            pass
-
-    return
 
 # ------------ main loop ------------
 
