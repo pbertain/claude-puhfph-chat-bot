@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-import json
 import pathlib
 import sqlite3
 import subprocess
@@ -12,8 +11,6 @@ from typing import Optional
 
 import requests
 
-from geocode_utils import AmbiguousLocation, GeocodeError, GeoCandidate, pick_best_or_raise
-
 # ------------ paths / config ------------
 
 STATE_FILE = pathlib.Path.home() / ".imessage_autoreply_last_rowid"
@@ -23,11 +20,15 @@ PROFILE_DB = pathlib.Path.home() / ".imessage_autoreply_profiles.sqlite3"
 
 POLL_SECONDS = 3
 
+# NWS asks for a descriptive UA with contact info
 NWS_USER_AGENT = "imessage-autoreply-bot/1.3 (claudep; contact: you@example.com)"
+
+# Consider someone "back" if they've been gone at least this long
 WELCOME_BACK_GAP_SECONDS = 15 * 60  # 15 minutes
 
-# SQLite tuning
-SQLITE_BUSY_TIMEOUT_MS = 5000
+# Geocoding defaults
+DEFAULT_COUNTRY_CODE = "US"   # prefer US results for city/state texts like "Davis, CA"
+GEOCODE_TIMEOUT = 10
 
 # ------------ AppleScript helpers ------------
 
@@ -46,6 +47,7 @@ on run argv
 end run
 '''
 
+# Returns best match; may be empty string.
 CONTACT_NAME_SCRIPT = r'''
 on run argv
   if (count of argv) < 1 then return ""
@@ -165,17 +167,31 @@ def get_latest_incoming_since(last_rowid: int) -> Optional[Incoming]:
         text=str(row["text"] or "").strip(),
     )
 
-# ------------ profile DB ------------
+# ------------ profile DB + conversation state ------------
 
 def db_connect() -> sqlite3.Connection:
-    con = sqlite3.connect(PROFILE_DB, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)
-    # lock handling
-    con.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS};")
-    # WAL helps concurrency; NORMAL reduces fsync pressure
+    # timeout helps with "database is locked"
+    con = sqlite3.connect(PROFILE_DB, timeout=5.0)
     con.execute("PRAGMA journal_mode=WAL;")
-    con.execute("PRAGMA synchronous=NORMAL;")
     con.execute("PRAGMA foreign_keys=ON;")
     return con
+
+def _db_exec(fn, *, retries: int = 5, delay: float = 0.15):
+    """
+    Small retry wrapper for transient SQLITE_BUSY/locked errors.
+    """
+    last_err = None
+    for i in range(retries):
+        try:
+            return fn()
+        except sqlite3.OperationalError as e:
+            msg = str(e).lower()
+            if "locked" in msg or "busy" in msg:
+                last_err = e
+                time.sleep(delay * (i + 1))
+                continue
+            raise
+    raise last_err or RuntimeError("DB operation failed")
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -188,100 +204,92 @@ def parse_iso(ts: str) -> Optional[datetime]:
     except Exception:
         return None
 
-def table_has_column(con: sqlite3.Connection, table: str, col: str) -> bool:
-    rows = con.execute(f"PRAGMA table_info({table});").fetchall()
-    return any(r[1] == col for r in rows)
-
-def migrate_schema(con: sqlite3.Connection) -> None:
-    """
-    Safe on existing DBs:
-    - creates tables if missing
-    - adds new columns if missing (ALTER TABLE)
-    """
-    con.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS person (
-          handle_id TEXT PRIMARY KEY,
-          first_name TEXT,
-          last_name TEXT,
-          location_text TEXT,
-          lat REAL,
-          lon REAL,
-          first_seen_at TEXT NOT NULL,
-          last_seen_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS convo_state (
-          handle_id TEXT PRIMARY KEY,
-          state TEXT NOT NULL,
-          last_incoming_at TEXT,
-          last_welcome_at TEXT,
-          updated_at TEXT NOT NULL,
-          FOREIGN KEY(handle_id) REFERENCES person(handle_id) ON DELETE CASCADE
-        );
-        """
-    )
-
-    # Add new columns if they don't exist (older DB)
-    if not table_has_column(con, "convo_state", "pending_location_query"):
-        con.execute("ALTER TABLE convo_state ADD COLUMN pending_location_query TEXT;")
-    if not table_has_column(con, "convo_state", "pending_location_choices"):
-        con.execute("ALTER TABLE convo_state ADD COLUMN pending_location_choices TEXT;")
-
 def db_init() -> None:
-    con = db_connect()
-    migrate_schema(con)
-    con.commit()
-    con.close()
+    def _init():
+        con = db_connect()
+        con.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS person (
+              handle_id TEXT PRIMARY KEY,
+              first_name TEXT,
+              last_name TEXT,
+              location_text TEXT,
+              lat REAL,
+              lon REAL,
+              first_seen_at TEXT NOT NULL,
+              last_seen_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS convo_state (
+              handle_id TEXT PRIMARY KEY,
+              state TEXT NOT NULL,              -- 'need_first' | 'need_last' | 'need_location' | 'ready'
+              last_incoming_at TEXT,
+              last_welcome_at TEXT,
+              updated_at TEXT NOT NULL,
+              FOREIGN KEY(handle_id) REFERENCES person(handle_id) ON DELETE CASCADE
+            );
+            """
+        )
+        con.commit()
+        con.close()
+    _db_exec(_init)
 
 def ensure_person_row(handle_id: str) -> None:
-    con = db_connect()
     ts = now_iso()
 
-    con.execute(
-        """
-        INSERT INTO person(handle_id, first_seen_at, last_seen_at, updated_at)
-        VALUES(?, ?, ?, ?)
-        ON CONFLICT(handle_id) DO NOTHING
-        """,
-        (handle_id, ts, ts, ts),
-    )
+    def _do():
+        con = db_connect()
+        con.execute(
+            """
+            INSERT INTO person(handle_id, first_seen_at, last_seen_at, updated_at)
+            VALUES(?, ?, ?, ?)
+            ON CONFLICT(handle_id) DO NOTHING
+            """,
+            (handle_id, ts, ts, ts),
+        )
 
-    con.execute(
-        """
-        INSERT INTO convo_state(handle_id, state, last_incoming_at, last_welcome_at,
-                                pending_location_query, pending_location_choices, updated_at)
-        VALUES(?, 'need_first', NULL, NULL, NULL, NULL, ?)
-        ON CONFLICT(handle_id) DO NOTHING
-        """,
-        (handle_id, ts),
-    )
+        con.execute(
+            """
+            INSERT INTO convo_state(handle_id, state, last_incoming_at, last_welcome_at, updated_at)
+            VALUES(?, 'need_first', NULL, NULL, ?)
+            ON CONFLICT(handle_id) DO NOTHING
+            """,
+            (handle_id, ts),
+        )
 
-    con.commit()
-    con.close()
+        con.commit()
+        con.close()
+
+    _db_exec(_do)
 
 def get_state(handle_id: str) -> str:
-    con = db_connect()
-    row = con.execute(
-        "SELECT state FROM convo_state WHERE handle_id = ?",
-        (handle_id,),
-    ).fetchone()
-    con.close()
-    return row[0] if row else "need_first"
+    def _do():
+        con = db_connect()
+        row = con.execute(
+            "SELECT state FROM convo_state WHERE handle_id = ?",
+            (handle_id,),
+        ).fetchone()
+        con.close()
+        return row[0] if row else "need_first"
+
+    return _db_exec(_do)
 
 def set_state(handle_id: str, state: str) -> None:
-    con = db_connect()
-    con.execute(
-        "UPDATE convo_state SET state = ?, updated_at = ? WHERE handle_id = ?",
-        (state, now_iso(), handle_id),
-    )
-    con.commit()
-    con.close()
+    def _do():
+        con = db_connect()
+        con.execute(
+            "UPDATE convo_state SET state = ?, updated_at = ? WHERE handle_id = ?",
+            (state, now_iso(), handle_id),
+        )
+        con.commit()
+        con.close()
+    _db_exec(_do)
 
 def update_person(handle_id: str, **fields) -> None:
     if not fields:
         return
+
     cols = []
     vals = []
     for k, v in fields.items():
@@ -291,61 +299,55 @@ def update_person(handle_id: str, **fields) -> None:
     vals.append(now_iso())
     vals.append(handle_id)
 
-    con = db_connect()
-    con.execute(f"UPDATE person SET {', '.join(cols)} WHERE handle_id = ?", vals)
-    con.commit()
-    con.close()
+    def _do():
+        con = db_connect()
+        con.execute(f"UPDATE person SET {', '.join(cols)} WHERE handle_id = ?", vals)
+        con.commit()
+        con.close()
+    _db_exec(_do)
 
 def get_person(handle_id: str) -> dict:
-    con = db_connect()
-    row = con.execute(
-        """
-        SELECT handle_id, first_name, last_name, location_text, lat, lon,
-               first_seen_at, last_seen_at
-        FROM person WHERE handle_id = ?
-        """,
-        (handle_id,),
-    ).fetchone()
-    con.close()
-    if not row:
-        return {}
-    return {
-        "handle_id": row[0],
-        "first_name": row[1],
-        "last_name": row[2],
-        "location_text": row[3],
-        "lat": row[4],
-        "lon": row[5],
-        "first_seen_at": row[6],
-        "last_seen_at": row[7],
-    }
+    def _do():
+        con = db_connect()
+        row = con.execute(
+            """
+            SELECT handle_id, first_name, last_name, location_text, lat, lon,
+                   first_seen_at, last_seen_at
+            FROM person WHERE handle_id = ?
+            """,
+            (handle_id,),
+        ).fetchone()
+        con.close()
+        if not row:
+            return {}
+        return {
+            "handle_id": row[0],
+            "first_name": row[1],
+            "last_name": row[2],
+            "location_text": row[3],
+            "lat": row[4],
+            "lon": row[5],
+            "first_seen_at": row[6],
+            "last_seen_at": row[7],
+        }
+
+    return _db_exec(_do)
 
 def get_convo_meta(handle_id: str) -> dict:
-    con = db_connect()
-    row = con.execute(
-        """
-        SELECT last_incoming_at, last_welcome_at,
-               COALESCE(pending_location_query,''), COALESCE(pending_location_choices,'')
-        FROM convo_state WHERE handle_id = ?
-        """,
-        (handle_id,),
-    ).fetchone()
-    con.close()
-    return {
-        "last_incoming_at": row[0] if row else None,
-        "last_welcome_at": row[1] if row else None,
-        "pending_location_query": row[2] if row else "",
-        "pending_location_choices": row[3] if row else "",
-    }
+    def _do():
+        con = db_connect()
+        row = con.execute(
+            "SELECT last_incoming_at, last_welcome_at FROM convo_state WHERE handle_id = ?",
+            (handle_id,),
+        ).fetchone()
+        con.close()
+        return {
+            "last_incoming_at": row[0] if row else None,
+            "last_welcome_at": row[1] if row else None,
+        }
+    return _db_exec(_do)
 
-def set_convo_meta(
-    handle_id: str,
-    *,
-    last_incoming_at: str | None = None,
-    last_welcome_at: str | None = None,
-    pending_location_query: str | None = None,
-    pending_location_choices: str | None = None,
-) -> None:
+def set_convo_meta(handle_id: str, *, last_incoming_at: str | None = None, last_welcome_at: str | None = None) -> None:
     sets = []
     vals: list[str] = []
     if last_incoming_at is not None:
@@ -354,25 +356,18 @@ def set_convo_meta(
     if last_welcome_at is not None:
         sets.append("last_welcome_at = ?")
         vals.append(last_welcome_at)
-    if pending_location_query is not None:
-        sets.append("pending_location_query = ?")
-        vals.append(pending_location_query)
-    if pending_location_choices is not None:
-        sets.append("pending_location_choices = ?")
-        vals.append(pending_location_choices)
     if not sets:
         return
     sets.append("updated_at = ?")
     vals.append(now_iso())
     vals.append(handle_id)
 
-    con = db_connect()
-    con.execute(f"UPDATE convo_state SET {', '.join(sets)} WHERE handle_id = ?", vals)
-    con.commit()
-    con.close()
-
-def clear_pending_location(handle_id: str) -> None:
-    set_convo_meta(handle_id, pending_location_query="", pending_location_choices="")
+    def _do():
+        con = db_connect()
+        con.execute(f"UPDATE convo_state SET {', '.join(sets)} WHERE handle_id = ?", vals)
+        con.commit()
+        con.close()
+    _db_exec(_do)
 
 def display_first_name(handle_id: str) -> str:
     p = get_person(handle_id)
@@ -383,7 +378,7 @@ def display_first_name(handle_id: str) -> str:
         return cn.strip().split()[0]
     return "there"
 
-# ------------ elapsed formatter ------------
+# ------------ “how long has it been?” formatter ------------
 
 def human_elapsed(seconds: int) -> str:
     if seconds < 0:
@@ -403,6 +398,116 @@ def human_elapsed(seconds: int) -> str:
             parts.append(f"{n} {label}{'' if n == 1 else 's'}")
 
     return ", ".join(parts) if parts else "less than a minute"
+
+# ------------ Geocoding (Open-Meteo first) ------------
+
+STATE_ABBR_RE = re.compile(r"^\s*([A-Za-z\.\s'-]+?)\s*,\s*([A-Za-z]{2})\s*$")
+
+def normalize_text(s: str) -> str:
+    return " ".join((s or "").strip().split())
+
+def parse_city_state(loc: str) -> tuple[str, str | None]:
+    """
+    Accepts:
+      - "Davis, CA" -> ("Davis", "CA")
+      - "Seattle, wa" -> ("Seattle", "WA")
+      - "Davis" -> ("Davis", None)
+    """
+    loc = normalize_text(loc)
+    m = STATE_ABBR_RE.match(loc)
+    if m:
+        city = normalize_text(m.group(1))
+        st = m.group(2).upper()
+        return city, st
+    return loc, None
+
+def open_meteo_geocode(loc: str, *, country_code: str | None = DEFAULT_COUNTRY_CODE) -> tuple[float, float, str]:
+    """
+    Open-Meteo geocoding:
+      https://geocoding-api.open-meteo.com/v1/search?name=...&count=...&country_code=...
+    Returns (lat, lon, display_name)
+    """
+    loc = normalize_text(loc)
+    if not loc:
+        raise ValueError("Empty location")
+
+    city, st = parse_city_state(loc)
+
+    # Search term: keep it human-ish; Open-Meteo handles fuzzy matching well.
+    # For US: "Davis, CA" is a good hint.
+    q = city if not st else f"{city}, {st}"
+
+    params = {"name": q, "count": 10, "format": "json"}
+    if country_code:
+        params["country_code"] = country_code
+
+    url = "https://geocoding-api.open-meteo.com/v1/search"
+    r = requests.get(url, params=params, timeout=GEOCODE_TIMEOUT)
+    r.raise_for_status()
+    data = r.json()
+    results = data.get("results") or []
+    if not results:
+        raise ValueError(f"No Open-Meteo geocode match for: {loc}")
+
+    # Pick best: if user gave a state, prefer matching admin1_code
+    def score(item: dict) -> tuple[int, int]:
+        # higher is better
+        admin1 = (item.get("admin1_code") or "").upper()
+        country = (item.get("country_code") or "").upper()
+        s_state = 1 if (st and admin1 == st) else 0
+        s_country = 1 if (country_code and country == (country_code or "").upper()) else 0
+        return (s_state, s_country)
+
+    best = max(results, key=lambda x: score(x))
+
+    lat = float(best["latitude"])
+    lon = float(best["longitude"])
+
+    # Nice label like "Davis, California, United States"
+    name = best.get("name") or city
+    admin1_name = best.get("admin1") or (st or "")
+    country_name = best.get("country") or ""
+    pretty = ", ".join([p for p in [name, admin1_name, country_name] if p])
+
+    return lat, lon, pretty
+
+def census_geocode_address_fallback(loc: str) -> tuple[float, float]:
+    """
+    Your previous Census one-line geocoder as a fallback (best for street addresses).
+    """
+    loc = " ".join((loc or "").strip().split())
+    if not loc:
+        raise ValueError("Empty location")
+
+    candidates = [loc]
+    if "usa" not in loc.lower() and "united states" not in loc.lower():
+        candidates.append(f"{loc}, USA")
+        candidates.append(f"{loc} United States")
+
+    url = "https://geocoding.geo.census.gov/geocoder/locations/onelineaddress"
+    for addr in candidates:
+        params = {"address": addr, "benchmark": "Public_AR_Current", "format": "json"}
+        r = requests.get(url, params=params, timeout=GEOCODE_TIMEOUT)
+        r.raise_for_status()
+        data = r.json()
+        matches = (data.get("result", {}) or {}).get("addressMatches", []) or []
+        if matches:
+            coords = matches[0].get("coordinates") or {}
+            lon = float(coords["x"])
+            lat = float(coords["y"])
+            return lat, lon
+
+    raise ValueError(f"No Census geocode match for: {loc}")
+
+def geocode_location(loc: str) -> tuple[float, float, str]:
+    """
+    Try Open-Meteo (great for 'City, ST'), then fall back to Census (great for full addresses).
+    """
+    try:
+        return open_meteo_geocode(loc, country_code=DEFAULT_COUNTRY_CODE)
+    except Exception:
+        lat, lon = census_geocode_address_fallback(loc)
+        return lat, lon, loc
 
 # ------------ NWS forecast ------------
 
@@ -438,15 +543,15 @@ def nws_forecast_one_liner(lat: float, lon: float) -> str:
 # ------------ commands / parsing ------------
 
 HELP_TEXT = """Commands:
-• help / ?                 Show this help
-• weather / wx             Get your forecast (based on saved location)
-• I'm in <place> now       Update your location and get forecast
-If I find multiple matches, I’ll ask you to reply with a number.
-Examples:
-• wx
+• help / ?              Show this help
+• weather / wx          Get your current forecast (based on saved location)
+• I'm in <place> now    Update your location and get forecast
+
+Location examples (city/state is enough now):
 • I'm in Davis, CA now
-• 95616
-• Paris, France
+• I'm in Seattle, WA now
+• I'm in Austin, TX now
+• I'm in Paris now
 """
 
 WEATHER_COMMANDS = {"weather", "wx", "forecast", "temp"}
@@ -455,11 +560,6 @@ IN_NOW_RE = re.compile(
     r"""^\s*(?:i'?m|i\s+am)?\s*in\s+(?P<loc>.+?)\s+now\s*$""",
     re.IGNORECASE,
 )
-
-PICK_RE = re.compile(r"^\s*(?:use|pick|choose)?\s*(\d{1,2})\s*$", re.IGNORECASE)
-
-def normalize_text(s: str) -> str:
-    return " ".join((s or "").strip().split())
 
 def is_help(text: str) -> bool:
     t = normalize_text(text).lower()
@@ -476,79 +576,22 @@ def extract_in_now_location(text: str) -> str | None:
     loc = normalize_text(m.group("loc"))
     return loc if loc else None
 
-def parse_pick_number(text: str) -> int | None:
-    m = PICK_RE.match(text or "")
-    if not m:
-        return None
-    try:
-        return int(m.group(1))
-    except Exception:
-        return None
-
-def format_choice_list(query: str, choices: list[GeoCandidate]) -> str:
-    lines = [f'I found multiple matches for “{query}”. Reply with a number:']
-    for i, c in enumerate(choices[:5], start=1):
-        lines.append(f"{i}) {c.label}")
-    lines.append("")
-    lines.append("Tip: You can also send City, ST (e.g., Davis, CA) or a ZIP code.")
-    return "\n".join(lines)
-
-def store_pending_choices(handle_id: str, query: str, choices: list[GeoCandidate]) -> None:
-    blob = json.dumps([c.__dict__ for c in choices[:5]])
-    set_convo_meta(handle_id, pending_location_query=query, pending_location_choices=blob)
-    set_state(handle_id, "need_location_choice")
-
-def load_pending_choices(handle_id: str) -> tuple[str, list[GeoCandidate]]:
-    meta = get_convo_meta(handle_id)
-    q = meta.get("pending_location_query") or ""
-    raw = meta.get("pending_location_choices") or "[]"
-    try:
-        arr = json.loads(raw) if raw else []
-    except Exception:
-        arr = []
-    out: list[GeoCandidate] = []
-    for item in arr:
-        try:
-            out.append(
-                GeoCandidate(
-                    label=item["label"],
-                    lat=float(item["lat"]),
-                    lon=float(item["lon"]),
-                    source=item.get("source", "unknown"),
-                )
-            )
-        except Exception:
-            continue
-    return q, out
-
 # ------------ conversation logic ------------
 
-def set_location_direct(handle_id: str, label: str, lat: float, lon: float) -> None:
-    update_person(handle_id, location_text=label, lat=lat, lon=lon)
-    clear_pending_location(handle_id)
+def set_location(handle_id: str, loc: str) -> tuple[float, float, str]:
+    lat, lon, pretty = geocode_location(loc)
+    update_person(handle_id, location_text=pretty, lat=lat, lon=lon)
     set_state(handle_id, "ready")
+    return lat, lon, pretty
 
-def set_location_from_text_with_disambiguation(handle_id: str, raw_loc: str) -> tuple[float, float, str]:
-    try:
-        cand = pick_best_or_raise(raw_loc)
-        set_location_direct(handle_id, cand.label, cand.lat, cand.lon)
-        return cand.lat, cand.lon, cand.label
-    except AmbiguousLocation as amb:
-        store_pending_choices(handle_id, amb.query, amb.candidates)
-        raise
-    except GeocodeError:
-        raise
-    except Exception as e:
-        raise GeocodeError(str(e)) from e
-
-def reply_weather(handle_id: str, loc: str, lat: float, lon: float) -> None:
+def reply_weather(handle_id: str, loc_label: str, lat: float, lon: float) -> None:
     first = display_first_name(handle_id)
     greeting = time_of_day_greeting(datetime.now())
     try:
         wx = nws_forecast_one_liner(lat, lon)
     except Exception as e:
         wx = f"Weather lookup failed ({e})"
-    send_imessage(handle_id, f"{greeting} Hello {first} — forecast for {loc}:\n\n{wx}")
+    send_imessage(handle_id, f"{greeting} Hello {first} — forecast for {loc_label}:\n\n{wx}")
 
 def maybe_send_welcome_back(handle_id: str) -> None:
     meta = get_convo_meta(handle_id)
@@ -563,7 +606,6 @@ def maybe_send_welcome_back(handle_id: str) -> None:
 
     if gap < WELCOME_BACK_GAP_SECONDS:
         return
-
     if last_welcome and last_welcome > last_incoming:
         return
 
@@ -574,6 +616,8 @@ def maybe_send_welcome_back(handle_id: str) -> None:
 
 def handle_incoming(msg: Incoming) -> None:
     ensure_person_row(msg.handle_id)
+
+    person = get_person(msg.handle_id)
     update_person(msg.handle_id, last_seen_at=now_iso())
 
     maybe_send_welcome_back(msg.handle_id)
@@ -586,34 +630,16 @@ def handle_incoming(msg: Incoming) -> None:
         send_imessage(msg.handle_id, HELP_TEXT)
         return
 
-    # Disambiguation flow
-    state = get_state(msg.handle_id)
-    if state == "need_location_choice":
-        pick = parse_pick_number(msg.text)
-        q, choices = load_pending_choices(msg.handle_id)
-        if pick is None or pick < 1 or pick > len(choices):
-            send_imessage(msg.handle_id, f"Please reply with a number 1–{max(1,len(choices))} (or send City, ST / ZIP).")
-            return
-        chosen = choices[pick - 1]
-        set_location_direct(msg.handle_id, chosen.label, chosen.lat, chosen.lon)
-        send_imessage(msg.handle_id, f"Got it — saved your location as: {chosen.label}. Text “weather” or “wx” anytime.")
-        return
-
     in_now_loc = extract_in_now_location(msg.text)
     if in_now_loc:
         try:
-            lat, lon, label = set_location_from_text_with_disambiguation(msg.handle_id, in_now_loc)
-        except AmbiguousLocation as amb:
-            send_imessage(msg.handle_id, format_choice_list(amb.query, amb.candidates))
-            return
+            lat, lon, pretty = set_location(msg.handle_id, in_now_loc)
         except Exception as e:
-            send_imessage(msg.handle_id, f"Sorry — I couldn’t find that location. Try: “Davis, CA” or a ZIP code. ({e})")
+            send_imessage(msg.handle_id, f"Sorry — I couldn’t find that location. Try: “Davis, CA”. ({e})")
             return
-
-        reply_weather(msg.handle_id, label, lat, lon)
+        reply_weather(msg.handle_id, pretty, lat, lon)
         return
 
-    # Onboarding
     state = get_state(msg.handle_id)
 
     if state == "need_first":
@@ -624,7 +650,7 @@ def handle_incoming(msg: Incoming) -> None:
             last = " ".join(parts[1:]) if len(parts) > 1 else ""
             update_person(msg.handle_id, first_name=first, last_name=last)
             set_state(msg.handle_id, "need_location")
-            send_imessage(msg.handle_id, f"Hi {first}! What city and state are you in? (e.g., Davis, CA — or send a ZIP)")
+            send_imessage(msg.handle_id, f"Hi {first}! What city and state are you in? (e.g., Davis, CA)")
             return
 
         send_imessage(msg.handle_id, "Hi! What’s your first name?")
@@ -643,25 +669,22 @@ def handle_incoming(msg: Incoming) -> None:
             update_person(msg.handle_id, last_name=last)
             set_state(msg.handle_id, "need_location")
             first = display_first_name(msg.handle_id)
-            send_imessage(msg.handle_id, f"Thanks {first}! What city and state are you in? (e.g., Davis, CA — or send a ZIP)")
+            send_imessage(msg.handle_id, f"Thanks {first}! What city and state are you in? (e.g., Davis, CA)")
             return
 
     if state == "need_location":
         loc = normalize_text(msg.text)
         try:
-            lat, lon, label = set_location_from_text_with_disambiguation(msg.handle_id, loc)
-        except AmbiguousLocation as amb:
-            send_imessage(msg.handle_id, format_choice_list(amb.query, amb.candidates))
-            return
+            _, _, pretty = set_location(msg.handle_id, loc)
         except Exception as e:
-            send_imessage(msg.handle_id, f"Sorry — I couldn’t find that location. Try: “Davis, CA” or a ZIP code. ({e})")
+            send_imessage(msg.handle_id, f"Sorry — I couldn’t find that location. Try: “Davis, CA”. ({e})")
             return
 
         first = display_first_name(msg.handle_id)
-        send_imessage(msg.handle_id, f"Thanks {first}! Saved your location as: {label}. Text “weather” or “wx” anytime.")
+        send_imessage(msg.handle_id, f"Thanks {first}! Saved your location as: {pretty}. Text “weather” or “wx” anytime.")
         return
 
-    # ready
+    # ready state:
     if is_weather_cmd(msg.text):
         p = get_person(msg.handle_id)
         loc = p.get("location_text")
@@ -669,10 +692,12 @@ def handle_incoming(msg: Incoming) -> None:
         lon = p.get("lon")
         if not loc or lat is None or lon is None:
             set_state(msg.handle_id, "need_location")
-            send_imessage(msg.handle_id, f"What city and state are you in, {display_first_name(msg.handle_id)}? (e.g., Davis, CA — or send a ZIP)")
+            send_imessage(msg.handle_id, f"What city and state are you in, {display_first_name(msg.handle_id)}? (e.g., Davis, CA)")
             return
         reply_weather(msg.handle_id, loc, float(lat), float(lon))
         return
+
+    return
 
 # ------------ main loop ------------
 
