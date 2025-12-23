@@ -140,7 +140,7 @@ def set_location(handle_id: str, loc: str) -> tuple[float, float, str]:
 
 def get_last_contact_info(handle_id: str) -> tuple[int, str] | None:
     """Get last contact time info. Returns (seconds, formatted_string) or None.
-    Format: "[Last contact: HH:MM / XhYm ago]"
+    Format: "[ Last contact: HH:MM PST  X mins ago / {epoch_time} ]"
     """
     meta = database.get_convo_meta(handle_id)
     last_incoming = database.parse_iso(meta.get("last_incoming_at") or "")
@@ -158,16 +158,36 @@ def get_last_contact_info(handle_id: str) -> tuple[int, str] | None:
     local_time = last_incoming.astimezone()
     time_str = local_time.strftime("%H:%M")
     
-    # Format relative time
+    # Get timezone abbreviation (PST, PDT, etc.)
+    tz_abbr = local_time.strftime("%Z")
+    if not tz_abbr:
+        # Fallback if timezone abbreviation not available
+        tz_abbr = local_time.strftime("%z")
+        if tz_abbr:
+            tz_abbr = f"UTC{tz_abbr}"
+        else:
+            tz_abbr = "PST"  # Default fallback
+    
+    # Format relative time as "X mins ago" or "X hours X mins ago"
+    # Show minutes if less than 2 hours, otherwise show hours
+    total_minutes = gap_seconds // 60
     hours = gap_seconds // 3600
     minutes = (gap_seconds % 3600) // 60
     
-    if hours > 0:
-        relative_str = f"{hours}h{minutes}m"
+    if hours >= 2:
+        # 2+ hours: show as "X hours" or "X hours X mins"
+        if minutes > 0:
+            relative_str = f"{hours} hours {minutes} mins"
+        else:
+            relative_str = f"{hours} hours"
     else:
-        relative_str = f"{minutes}m"
+        # Less than 2 hours: show as "X mins"
+        relative_str = f"{total_minutes} mins"
     
-    formatted = f"[Last contact: {time_str} / {relative_str} ago]"
+    # Get epoch time
+    epoch_time = int(last_incoming.timestamp())
+    
+    formatted = f"[ Last contact: {time_str} {tz_abbr}  {relative_str} ago / {epoch_time} ]"
     
     return (gap_seconds, formatted)
 
@@ -186,10 +206,13 @@ def reply_weather(handle_id: str, loc_label: str, lat: float, lon: float) -> Non
     except Exception as e:
         wx = f"Weather lookup failed ({e})"
     
-    # Build message - format: "City, State forecast:\n\n{weather}\n\n[Last contact: ...]"
-    message = f"{loc_label} forecast:\n\n{wx}"
+    # Format location with proper case
+    city_state = format_city_state(loc_label)
     
-    # Add last contact info if available
+    # Build message - format: "City, State Forecast:\n\n{weather}\n\n[ Last contact: ... ]"
+    message = f"{city_state} Forecast:\n\n{wx}"
+    
+    # Add last contact info if available (with empty line before it)
     last_contact = get_last_contact_info(handle_id)
     if last_contact:
         _, formatted = last_contact
