@@ -46,11 +46,11 @@ def open_meteo_geocode(loc: str, *, country_code: str | None = config.DEFAULT_CO
 
     city, st = parse_city_state(loc)
 
-    # Search term: keep it human-ish; Open-Meteo handles fuzzy matching well.
-    # For US: "Davis, CA" is a good hint.
-    q = city if not st else f"{city}, {st}"
+    # Search term: Open-Meteo works better with just city name, then we filter by state
+    # Use just the city name for the search query
+    q = city
 
-    params = {"name": q, "count": 10, "format": "json"}
+    params = {"name": q, "count": 20, "format": "json"}  # Get more results to filter by state
     if country_code:
         params["country_code"] = country_code
 
@@ -62,14 +62,23 @@ def open_meteo_geocode(loc: str, *, country_code: str | None = config.DEFAULT_CO
     if not results:
         raise ValueError(f"No Open-Meteo geocode match for: {loc}")
 
-    # Pick best: if user gave a state, prefer matching admin1_code
-    def score(item: dict) -> tuple[int, int]:
+    # Pick best: prioritize exact city name match, then state match, then country
+    def score(item: dict) -> tuple[int, int, int]:
         # higher is better
+        item_name = (item.get("name") or "").upper()
         admin1 = (item.get("admin1_code") or "").upper()
         country = (item.get("country_code") or "").upper()
+        
+        # Exact city name match gets highest priority
+        city_match = 1 if city.upper() == item_name else 0
+        
+        # State match
         s_state = 1 if (st and admin1 == st) else 0
+        
+        # Country match
         s_country = 1 if (country_code and country == (country_code or "").upper()) else 0
-        return (s_state, s_country)
+        
+        return (city_match, s_state, s_country)
 
     best = max(results, key=lambda x: score(x))
 
@@ -123,12 +132,33 @@ def census_geocode_address_fallback(loc: str) -> tuple[float, float]:
 
 def geocode_location(loc: str) -> tuple[float, float, str]:
     """
-    Try Open-Meteo (great for 'City, ST'), then fall back to Census (great for full addresses).
+    Try Open-Meteo (great for 'City, ST' and city names), then fall back to Census (great for full addresses).
     Returns (lat, lon, display_name) where display_name is "City, State" format.
     """
+    loc = normalize_text(loc)
+    if not loc:
+        raise ValueError("Empty location")
+    
+    # Parse location first
+    city, st = parse_city_state(loc)
+    has_numbers = any(char.isdigit() for char in loc)
+    
+    # First try Open-Meteo with country restriction (works great for US cities)
     try:
         return open_meteo_geocode(loc, country_code=config.DEFAULT_COUNTRY_CODE)
     except Exception:
+        pass
+    
+    # If that fails and it's a city name (no numbers), try without country restriction
+    if not has_numbers:
+        try:
+            return open_meteo_geocode(loc, country_code=None)
+        except Exception:
+            pass
+    
+    # Fall back to Census (best for full addresses with street numbers)
+    # But also try Census for city names as it sometimes works
+    try:
         lat, lon = census_geocode_address_fallback(loc)
         # For Census fallback, try to extract city, state from the input
         # Parse "City, State" or "Address, City, State" format
@@ -140,4 +170,7 @@ def geocode_location(loc: str) -> tuple[float, float, str]:
             if len(state) == 2:
                 return lat, lon, f"{city}, {state}"
         return lat, lon, loc
+    except Exception:
+        # If all fail, raise with helpful message
+        raise ValueError(f"Could not geocode location '{loc}'. Try format like 'City, State' (e.g., 'Davis, CA') or a full address.")
 

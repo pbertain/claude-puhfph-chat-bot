@@ -94,6 +94,11 @@ SCHEDULE_QUERY_QUESTIONS = {"what do i have scheduled", "what's scheduled", "sho
                             "list my schedule", "what schedules", "my schedules", "what reminders",
                             "show my reminders", "what do i have scheduled"}
 
+# Name change keywords
+NAME_CHANGE_KEYWORDS = {"change", "update", "wrong", "correct", "fix", "my name is", "name should be"}
+NAME_CHANGE_PATTERNS = ["change my name", "update my name", "my name is wrong", "fix my name", 
+                        "correct my name", "my name should be", "update name"]
+
 IN_NOW_RE = re.compile(
     r"""^\s*(?:i'?m|i\s+am)?\s*in\s+(?P<loc>.+?)\s+now\s*$""",
     re.IGNORECASE,
@@ -108,7 +113,8 @@ def normalize_text(s: str) -> str:
 def is_help(text: str) -> bool:
     """Check if text is a help command."""
     t = normalize_text(text).lower()
-    return t in {"help", "?", "commands"}
+    help_keywords = {"help", "?", "commands", "what can you do", "what do you do", "show help", "help me"}
+    return t in help_keywords or any(kw in t for kw in ["help", "what can", "what do you"])
 
 
 def is_weather_cmd(text: str) -> bool:
@@ -178,6 +184,46 @@ def is_schedule_query_cmd(text: str) -> bool:
         return True
     
     return False
+
+
+def is_name_change_cmd(text: str) -> bool:
+    """Check if text is requesting a name change."""
+    t = normalize_text(text).lower()
+    
+    # Check for exact patterns
+    if any(pattern in t for pattern in NAME_CHANGE_PATTERNS):
+        return True
+    
+    # Check for keywords that suggest name change
+    has_name_keyword = "name" in t
+    has_change_keyword = any(kw in t for kw in NAME_CHANGE_KEYWORDS)
+    
+    if has_name_keyword and has_change_keyword:
+        return True
+    
+    return False
+
+
+def extract_name_from_text(text: str) -> tuple[str | None, str | None]:
+    """Extract first and last name from text like 'my name is John Doe' or 'John Doe'."""
+    t = normalize_text(text).lower()
+    
+    # Remove common prefixes
+    prefixes = ["my name is", "i'm", "i am", "call me", "name is", "it's", "it is", "update my name to", "change my name to"]
+    for prefix in prefixes:
+        if t.startswith(prefix):
+            t = t[len(prefix):].strip()
+            break
+    
+    # Split into parts
+    parts = t.split()
+    if not parts:
+        return None, None
+    
+    if len(parts) == 1:
+        return parts[0].title(), None
+    else:
+        return parts[0].title(), " ".join(parts[1:]).title()
 
 
 def extract_in_now_location(text: str) -> str | None:
@@ -418,6 +464,19 @@ def handle_incoming(msg: message_polling.Incoming) -> None:
     if is_help(msg.text):
         applescript_helpers.send_imessage(msg.handle_id, HELP_TEXT)
         return
+    
+    # Check for name change request (works in any state)
+    if is_name_change_cmd(msg.text):
+        first, last = extract_name_from_text(msg.text)
+        if first:
+            database.update_person(msg.handle_id, first_name=first)
+            if last:
+                database.update_person(msg.handle_id, last_name=last)
+            first_display = display_first_name(msg.handle_id)
+            applescript_helpers.send_imessage(msg.handle_id, f"Got it! I've updated your name to {first_display}. What else can I help you with?")
+        else:
+            applescript_helpers.send_imessage(msg.handle_id, "I'd be happy to update your name! What should I call you? For example, you could say \"My name is John\" or \"John Doe\".")
+        return
 
     in_now_loc = extract_in_now_location(msg.text)
     if in_now_loc:
@@ -625,12 +684,14 @@ def handle_incoming(msg: message_polling.Incoming) -> None:
         applescript_helpers.send_imessage(msg.handle_id, response)
         return
     
-    # Unknown message - send friendly response with weather
+    # Unknown message - send friendly response with weather and offer help
     p = database.get_person(msg.handle_id)
     loc = p.get("location_text")
     lat = p.get("lat")
     lon = p.get("lon")
     first_name = display_first_name(msg.handle_id)
+    
+    response_parts = [f"Hi {first_name}! I'm not sure I understand. For help, just ask me for 'Help'."]
     
     if loc and lat is not None and lon is not None:
         # Get weather for friendly response
@@ -640,14 +701,17 @@ def handle_incoming(msg: message_polling.Incoming) -> None:
             state = parts[1] if len(parts) > 1 and len(parts[1]) == 2 else None
             forecast = weather.wttr_forecast(city, state, "US")
             city_name = extract_city_name(loc)
-            response = f"Hi {first_name}! Looks like the weather forecast is {forecast} for {city_name}. Hope all is well with you!"
+            response_parts.append(f"It looks like the weather forecast is {forecast} for {city_name}.")
         except Exception:
-            city_name = extract_city_name(loc)
-            response = f"Hi {first_name}! Hope all is well with you!"
-    else:
-        response = f"Hi {first_name}! Hope all is well with you!"
+            pass
+    
+    response_parts.append("Do you want me to show the help info?")
+    response = " ".join(response_parts)
     
     applescript_helpers.send_imessage(msg.handle_id, response)
+    
+    # Automatically send help info after unknown message
+    applescript_helpers.send_imessage(msg.handle_id, HELP_TEXT)
     return
 
 
