@@ -53,29 +53,46 @@ def human_elapsed(seconds: int) -> str:
 
 # ------------ commands / parsing ------------
 
-HELP_TEXT = """Commands:
-• help / ?                          Show this help
-• weather / wx                      Get your current forecast (based on saved location)
-• I'm in <place> now                Update your location and get forecast
-• send me the weather at 7am everyday    Schedule daily weather reports
-• what do i have scheduled          Show your scheduled messages
-• last contact                      Show when we last talked
+HELP_TEXT = """Hi! I'm Claude Puhfph, your weather assistant. You can ask me things naturally:
 
-Location examples (city/state is enough now):
-• I'm in Davis, CA now
-• I'm in Seattle, WA now
-• I'm in Austin, TX now
-• I'm in Paris now
+Weather questions:
+• "What's the weather?" or "How's the weather?"
+• "Tell me the weather" or "Give me a forecast"
+• "What's it like outside?" or "How's it outside?"
+• Or just say "weather" or "wx"
 
-Schedule examples:
-• send me the weather at 7am everyday
-• send me the weather at 7:30pm daily
-• send me the weather at 7am once
+Location updates:
+• "I'm in Davis, CA now"
+• "I'm in Seattle, WA"
+• Or just say "Davis, CA"
+
+Scheduling:
+• "Send me the weather at 7am everyday"
+• "Text me the weather in 5 mins"
+• "Schedule weather at 7:30pm daily"
+
+Other questions:
+• "What do I have scheduled?" or "Show my schedule"
+• "When did we last talk?" or "Last contact"
+
+Feel free to ask naturally - I understand conversational language!
 """
 
-WEATHER_COMMANDS = {"weather", "wx", "forecast", "temp"}
-LAST_CONTACT_COMMANDS = {"when did we last talk", "last contact", "when did we last contact", "last time we talked"}
-SCHEDULE_QUERY_COMMANDS = {"what do i have scheduled", "what's scheduled", "show my schedule", "list schedule", "what schedules", "my schedules"}
+# Natural language keywords for intent detection
+WEATHER_KEYWORDS = {"weather", "forecast", "temperature", "temp", "wx", "rain", "sunny", "cloudy", "snow", "wind", "outside", "conditions"}
+WEATHER_QUESTIONS = {"what's the weather", "how's the weather", "what is the weather", "tell me the weather", 
+                     "give me the weather", "show me the weather", "weather forecast", "weather report",
+                     "how is it outside", "what's it like outside", "how's it outside", "what's the weather like"}
+
+LAST_CONTACT_KEYWORDS = {"last", "contact", "talk", "spoke", "messaged", "texted", "when did", "how long"}
+LAST_CONTACT_QUESTIONS = {"when did we last talk", "when did we last contact", "when did we last speak",
+                          "how long ago did we talk", "last time we talked", "last contact"}
+
+SCHEDULE_KEYWORDS = {"schedule", "scheduled", "scheduling", "reminder", "remind"}
+SCHEDULE_QUERY_KEYWORDS = {"what", "show", "list", "tell", "my", "have"}
+SCHEDULE_QUERY_QUESTIONS = {"what do i have scheduled", "what's scheduled", "show my schedule", 
+                            "list my schedule", "what schedules", "my schedules", "what reminders",
+                            "show my reminders", "what do i have scheduled"}
 
 IN_NOW_RE = re.compile(
     r"""^\s*(?:i'?m|i\s+am)?\s*in\s+(?P<loc>.+?)\s+now\s*$""",
@@ -95,21 +112,72 @@ def is_help(text: str) -> bool:
 
 
 def is_weather_cmd(text: str) -> bool:
-    """Check if text is a weather command."""
+    """Check if text is asking about weather using natural language."""
     t = normalize_text(text).lower()
-    return t in WEATHER_COMMANDS
+    
+    # Check for exact weather questions
+    if any(q in t for q in WEATHER_QUESTIONS):
+        return True
+    
+    # Check for weather keywords combined with question words
+    has_weather_keyword = any(kw in t for kw in WEATHER_KEYWORDS)
+    has_question_word = any(qw in t for qw in ["what", "how", "tell", "give", "show", "what's", "what is"])
+    
+    # Simple weather commands (exact matches)
+    if t in {"weather", "wx", "forecast", "temp"}:
+        return True
+    
+    # Natural language: "what's the weather" or "how's the weather" or "tell me about the weather"
+    if has_weather_keyword and (has_question_word or t.startswith(("what", "how", "tell", "give", "show"))):
+        return True
+    
+    return False
 
 
 def is_last_contact_cmd(text: str) -> bool:
-    """Check if text is asking for last contact info."""
+    """Check if text is asking for last contact info using natural language."""
     t = normalize_text(text).lower()
-    return any(cmd in t for cmd in LAST_CONTACT_COMMANDS)
+    
+    # Check for exact questions
+    if any(q in t for q in LAST_CONTACT_QUESTIONS):
+        return True
+    
+    # Check for keywords that suggest asking about last contact
+    has_contact_keyword = any(kw in t for kw in LAST_CONTACT_KEYWORDS)
+    has_question_word = any(qw in t for qw in ["when", "how long", "what time", "last"])
+    
+    # Natural language patterns
+    if has_contact_keyword and has_question_word:
+        return True
+    
+    # Patterns like "when did we last talk" or "how long ago"
+    if ("when" in t or "how long" in t) and any(kw in t for kw in ["last", "talk", "contact", "speak"]):
+        return True
+    
+    return False
 
 
 def is_schedule_query_cmd(text: str) -> bool:
-    """Check if text is asking about scheduled messages."""
+    """Check if text is asking about scheduled messages using natural language."""
     t = normalize_text(text).lower()
-    return any(cmd in t for cmd in SCHEDULE_QUERY_COMMANDS)
+    
+    # Check for exact questions
+    if any(q in t for q in SCHEDULE_QUERY_QUESTIONS):
+        return True
+    
+    # Check for schedule keywords combined with query keywords
+    has_schedule_keyword = any(kw in t for kw in SCHEDULE_KEYWORDS)
+    has_query_keyword = any(kw in t for kw in SCHEDULE_QUERY_KEYWORDS)
+    
+    # Natural language patterns
+    if has_schedule_keyword and has_query_keyword:
+        return True
+    
+    # Patterns like "what do i have scheduled" or "show my reminders"
+    if ("what" in t or "show" in t or "list" in t) and ("schedule" in t or "reminder" in t):
+        return True
+    
+    return False
 
 
 def extract_in_now_location(text: str) -> str | None:
@@ -371,10 +439,10 @@ def handle_incoming(msg: message_polling.Incoming) -> None:
             last = " ".join(parts[1:]) if len(parts) > 1 else ""
             database.update_person(msg.handle_id, first_name=first, last_name=last)
             database.set_state(msg.handle_id, "need_location")
-            applescript_helpers.send_imessage(msg.handle_id, f"Hi {first}! What city and state are you in? (e.g., Davis, CA)")
+            applescript_helpers.send_imessage(msg.handle_id, f"Hi {first}! Nice to meet you! What city are you in? For example, you could say \"Davis, CA\" or \"I'm in Seattle, WA\".")
             return
 
-        applescript_helpers.send_imessage(msg.handle_id, "Hi! What's your first name?")
+        applescript_helpers.send_imessage(msg.handle_id, "Hi there! I'm Claude Puhfph, your weather assistant. What's your first name?")
         database.set_state(msg.handle_id, "need_last")
         return
 
@@ -390,19 +458,22 @@ def handle_incoming(msg: message_polling.Incoming) -> None:
             database.update_person(msg.handle_id, last_name=last)
             database.set_state(msg.handle_id, "need_location")
             first = display_first_name(msg.handle_id)
-            applescript_helpers.send_imessage(msg.handle_id, f"Thanks {first}! What city and state are you in? (e.g., Davis, CA)")
+            applescript_helpers.send_imessage(msg.handle_id, f"Thanks {first}! What city are you in? You can say something like \"Davis, CA\" or \"I'm in Seattle, WA\".")
             return
 
     if state == "need_location":
-        loc = normalize_text(msg.text)
+        # Try to extract location from natural language
+        loc = extract_in_now_location(msg.text) or normalize_text(msg.text)
         try:
             _, _, pretty = set_location(msg.handle_id, loc)
         except Exception as e:
-            applescript_helpers.send_imessage(msg.handle_id, f"Sorry — I couldn't find that location. Try: \"Davis, CA\". ({e})")
+            first = display_first_name(msg.handle_id)
+            applescript_helpers.send_imessage(msg.handle_id, f"Sorry {first}, I couldn't find that location. Could you try again? For example: \"Davis, CA\" or \"I'm in Seattle, WA\".")
             return
 
         first = display_first_name(msg.handle_id)
-        applescript_helpers.send_imessage(msg.handle_id, f"Thanks {first}! Saved your location as: {pretty}. Text \"weather\" or \"wx\" anytime.")
+        city_name = extract_city_name(pretty)
+        applescript_helpers.send_imessage(msg.handle_id, f"Perfect! I've saved your location as {city_name}. You can ask me things like \"What's the weather?\" or \"How's the weather?\" anytime!")
         return
 
     # ready state:
@@ -425,7 +496,8 @@ def handle_incoming(msg: message_polling.Incoming) -> None:
         lon = p.get("lon")
         if not loc or lat is None or lon is None:
             database.set_state(msg.handle_id, "need_location")
-            applescript_helpers.send_imessage(msg.handle_id, f"What city and state are you in, {display_first_name(msg.handle_id)}? (e.g., Davis, CA)")
+            first = display_first_name(msg.handle_id)
+            applescript_helpers.send_imessage(msg.handle_id, f"I'd love to give you the weather, {first}! What city are you in? You can say something like \"Davis, CA\" or \"I'm in Seattle, WA\".")
             return
         reply_weather(msg.handle_id, loc, float(lat), float(lon))
         return
@@ -438,7 +510,8 @@ def handle_incoming(msg: message_polling.Incoming) -> None:
         lat = p.get("lat")
         lon = p.get("lon")
         if not loc or lat is None or lon is None:
-            applescript_helpers.send_imessage(msg.handle_id, f"I need your location first. What city and state are you in, {display_first_name(msg.handle_id)}? (e.g., Davis, CA)")
+            first = display_first_name(msg.handle_id)
+            applescript_helpers.send_imessage(msg.handle_id, f"I'd love to help with that, {first}! First, what city are you in? You can say something like \"Davis, CA\" or \"I'm in Seattle, WA\".")
             return
         
         try:
