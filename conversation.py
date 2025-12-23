@@ -118,6 +118,18 @@ def display_first_name(handle_id: str) -> str:
     return "there"
 
 
+def format_city_state(loc_label: str) -> str:
+    """Format location as 'City, State' with city in title case."""
+    # loc_label should be "City, State" format
+    parts = [p.strip() for p in loc_label.split(",")]
+    if len(parts) >= 2:
+        city = parts[0].title()  # Title case: first letter uppercase, rest lowercase
+        state = parts[1].upper()  # State abbreviation in uppercase
+        return f"{city}, {state}"
+    # Fallback if format is unexpected
+    return loc_label.title()
+
+
 def set_location(handle_id: str, loc: str) -> tuple[float, float, str]:
     """Set location for a person and update their state to ready."""
     lat, lon, pretty = geocode.geocode_location(loc)
@@ -127,7 +139,9 @@ def set_location(handle_id: str, loc: str) -> tuple[float, float, str]:
 
 
 def get_last_contact_info(handle_id: str) -> tuple[int, str] | None:
-    """Get last contact time info. Returns (seconds, formatted_string) or None."""
+    """Get last contact time info. Returns (seconds, formatted_string) or None.
+    Format: "[Last contact: HH:MM / XhYm ago]"
+    """
     meta = database.get_convo_meta(handle_id)
     last_incoming = database.parse_iso(meta.get("last_incoming_at") or "")
     
@@ -140,42 +154,46 @@ def get_last_contact_info(handle_id: str) -> tuple[int, str] | None:
     if gap_seconds < 60:
         return None  # Too recent to show
     
+    # Format time as HH:MM (24-hour format) in local timezone
+    local_time = last_incoming.astimezone()
+    time_str = local_time.strftime("%H:%M")
+    
+    # Format relative time
     hours = gap_seconds // 3600
     minutes = (gap_seconds % 3600) // 60
     
     if hours > 0:
-        formatted = f"{hours} hr{'s' if hours != 1 else ''}, {minutes} min{'s' if minutes != 1 else ''}"
+        relative_str = f"{hours}h{minutes}m"
     else:
-        formatted = f"{minutes} min{'s' if minutes != 1 else ''}"
+        relative_str = f"{minutes}m"
+    
+    formatted = f"[Last contact: {time_str} / {relative_str} ago]"
     
     return (gap_seconds, formatted)
 
 
 def reply_weather(handle_id: str, loc_label: str, lat: float, lon: float) -> None:
     """Send a weather forecast reply with last contact info."""
-    first = display_first_name(handle_id)
-    greeting = time_of_day_greeting(datetime.now())
-    
     # Parse location for wttr.in
-    # loc_label format: "City, State, Country" or "City, Country"
+    # loc_label should now be "City, State" format
     parts = [p.strip() for p in loc_label.split(",")]
     city = parts[0] if parts else loc_label
     state = parts[1] if len(parts) > 1 and len(parts[1]) == 2 else None
-    country = parts[-1] if len(parts) > 1 else "US"
+    country = "US"  # Default to US
     
     try:
         wx = weather.wttr_forecast(city, state, country)
     except Exception as e:
         wx = f"Weather lookup failed ({e})"
     
-    # Build message
-    message = f"{greeting}, {first}.\nThe forecast for {loc_label} is:\n\n{wx}"
+    # Build message - format: "City, State forecast:\n\n{weather}\n\n[Last contact: ...]"
+    message = f"{loc_label} forecast:\n\n{wx}"
     
     # Add last contact info if available
     last_contact = get_last_contact_info(handle_id)
     if last_contact:
         _, formatted = last_contact
-        message += f"\n\n[ Last contact: {formatted} ]"
+        message += f"\n\n{formatted}"
     
     applescript_helpers.send_imessage(handle_id, message)
 
@@ -318,9 +336,11 @@ def handle_incoming(msg: message_polling.Incoming) -> None:
                         time_desc += f" {minutes % 60} minute{'s' if minutes % 60 != 1 else ''}"
                 else:
                     time_desc = f"{minutes} minute{'s' if minutes != 1 else ''}"
+                # Format city name in title case
+                city_state = format_city_state(loc)
                 applescript_helpers.send_imessage(
                     msg.handle_id,
-                    f"Got it, {first}! I'll send you the weather in {time_desc}."
+                    f"Weather for {city_state} will be sent in {time_desc}."
                 )
             else:
                 # Handle absolute time scheduling
@@ -344,15 +364,17 @@ def handle_incoming(msg: message_polling.Incoming) -> None:
                     if tz_abbr:
                         tz_part = f" {tz_abbr}"
                 
+                # Format city name in title case
+                city_state = format_city_state(loc)
                 if schedule_info["schedule"] == scheduler.SCHEDULE_DAILY:
                     applescript_helpers.send_imessage(
                         msg.handle_id,
-                        f"Got it, {first}! I'll send you the weather at {time_str}{tz_part} every day."
+                        f"Weather for {city_state} will be sent at {time_str}{tz_part} every day."
                     )
                 else:
                     applescript_helpers.send_imessage(
                         msg.handle_id,
-                        f"Got it, {first}! I'll send you the weather at {time_str}{tz_part}."
+                        f"Weather for {city_state} will be sent at {time_str}{tz_part}."
                     )
         except Exception as e:
             applescript_helpers.send_imessage(

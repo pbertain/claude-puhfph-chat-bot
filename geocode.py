@@ -76,11 +76,18 @@ def open_meteo_geocode(loc: str, *, country_code: str | None = config.DEFAULT_CO
     lat = float(best["latitude"])
     lon = float(best["longitude"])
 
-    # Nice label like "Davis, California, United States"
+    # Return just "City, State" format (e.g., "Davis, CA")
     name = best.get("name") or city
-    admin1_name = best.get("admin1") or (st or "")
-    country_name = best.get("country") or ""
-    pretty = ", ".join([p for p in [name, admin1_name, country_name] if p])
+    admin1_code = best.get("admin1_code") or st or ""
+    
+    # If we have a state abbreviation, use it; otherwise use admin1 name
+    if admin1_code and len(admin1_code) == 2:
+        pretty = f"{name}, {admin1_code.upper()}"
+    elif st:
+        pretty = f"{name}, {st}"
+    else:
+        # Fallback to city only if no state
+        pretty = name
 
     return lat, lon, pretty
 
@@ -117,11 +124,20 @@ def census_geocode_address_fallback(loc: str) -> tuple[float, float]:
 def geocode_location(loc: str) -> tuple[float, float, str]:
     """
     Try Open-Meteo (great for 'City, ST'), then fall back to Census (great for full addresses).
-    Returns (lat, lon, display_name).
+    Returns (lat, lon, display_name) where display_name is "City, State" format.
     """
     try:
         return open_meteo_geocode(loc, country_code=config.DEFAULT_COUNTRY_CODE)
     except Exception:
         lat, lon = census_geocode_address_fallback(loc)
+        # For Census fallback, try to extract city, state from the input
+        # Parse "City, State" or "Address, City, State" format
+        parts = [p.strip() for p in loc.split(",")]
+        if len(parts) >= 2:
+            # Take last two parts as city, state
+            city = parts[-2].strip()
+            state = parts[-1].strip().upper()
+            if len(state) == 2:
+                return lat, lon, f"{city}, {state}"
         return lat, lon, loc
 
