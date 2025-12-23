@@ -51,13 +51,25 @@ def parse_time(text: str, tz_str: Optional[str] = None) -> tuple[Optional[time],
     timezone_str = tz_str or tz_abbr
     
     # Handle 24-hour format: "19:00", "7:30"
+    # Also handle ambiguous times like "1:20" - if 1-7, assume PM; 8-11 assume AM
     if re.match(r'^\d{1,2}:\d{2}$', text):
         try:
             parts = text.split(':')
             hour = int(parts[0])
             minute = int(parts[1])
             if 0 <= hour <= 23 and 0 <= minute <= 59:
-                return (time(hour, minute), timezone_str)
+                # If hour is 1-7 without am/pm, assume PM (common afternoon times)
+                # If hour is 8-11, assume AM (common morning times)
+                # If hour is 12-23, treat as 24-hour
+                if 1 <= hour <= 7:
+                    # Assume PM for 1:xx to 7:xx
+                    return (time(hour + 12, minute), timezone_str)
+                elif 8 <= hour <= 11:
+                    # Assume AM for 8:xx to 11:xx
+                    return (time(hour, minute), timezone_str)
+                else:
+                    # 12:xx to 23:xx - treat as 24-hour
+                    return (time(hour, minute), timezone_str)
         except ValueError:
             pass
     

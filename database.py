@@ -13,18 +13,25 @@ import config
 def db_connect() -> sqlite3.Connection:
     """Connect to the profile database with appropriate settings."""
     # timeout helps with "database is locked"
-    try:
-        con = sqlite3.connect(config.PROFILE_DB, timeout=5.0)
-        con.execute("PRAGMA journal_mode=WAL;")
-        con.execute("PRAGMA foreign_keys=ON;")
-        return con
-    except sqlite3.OperationalError as e:
-        if "unable to open database file" in str(e).lower():
-            raise PermissionError(
-                f"Cannot create/access profile database: {config.PROFILE_DB}\n"
-                "Check that the directory exists and you have write permissions."
-            ) from e
-        raise
+    # Increase timeout and add retries for locked database
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            con = sqlite3.connect(config.PROFILE_DB, timeout=10.0)
+            con.execute("PRAGMA journal_mode=WAL;")
+            con.execute("PRAGMA foreign_keys=ON;")
+            con.execute("PRAGMA busy_timeout=10000;")  # 10 second busy timeout
+            return con
+        except sqlite3.OperationalError as e:
+            if "unable to open database file" in str(e).lower():
+                raise PermissionError(
+                    f"Cannot create/access profile database: {config.PROFILE_DB}\n"
+                    "Check that the directory exists and you have write permissions."
+                ) from e
+            if "locked" in str(e).lower() and attempt < max_retries - 1:
+                time.sleep(0.5 * (attempt + 1))
+                continue
+            raise
 
 
 def db_exec(fn, *, retries: int = 5, delay: float = 0.15):
@@ -91,7 +98,7 @@ def db_init() -> None:
               schedule_id INTEGER PRIMARY KEY AUTOINCREMENT,
               handle_id TEXT NOT NULL,
               message_type TEXT NOT NULL,        -- 'weather', etc.
-              schedule_time TEXT NOT NULL,       -- HH:MM:SS format
+              schedule_time TEXT,                -- HH:MM:SS format (NULL for relative time schedules)
               schedule_type TEXT NOT NULL,       -- 'daily' | 'once'
               next_run_at TEXT NOT NULL,         -- ISO format timestamp
               created_at TEXT NOT NULL,
@@ -103,6 +110,48 @@ def db_init() -> None:
             ON scheduled_messages(next_run_at);
             """
         )
+        
+        # Check if table exists with old schema (schedule_time NOT NULL) and migrate if needed
+        try:
+            cursor = con.execute("PRAGMA table_info(scheduled_messages)")
+            columns = cursor.fetchall()
+            # Find schedule_time column - check if it's NOT NULL
+            schedule_time_col = next((col for col in columns if col[1] == "schedule_time"), None)
+            if schedule_time_col and schedule_time_col[3] == 1:  # 1 means NOT NULL constraint
+                # Need to migrate - recreate table
+                con.execute("BEGIN TRANSACTION")
+                try:
+                    con.execute("""
+                        CREATE TABLE scheduled_messages_new (
+                          schedule_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                          handle_id TEXT NOT NULL,
+                          message_type TEXT NOT NULL,
+                          schedule_time TEXT,
+                          schedule_type TEXT NOT NULL,
+                          next_run_at TEXT NOT NULL,
+                          created_at TEXT NOT NULL,
+                          updated_at TEXT NOT NULL,
+                          FOREIGN KEY(handle_id) REFERENCES person(handle_id) ON DELETE CASCADE
+                        )
+                    """)
+                    con.execute("""
+                        INSERT INTO scheduled_messages_new 
+                        SELECT * FROM scheduled_messages
+                    """)
+                    con.execute("DROP TABLE scheduled_messages")
+                    con.execute("ALTER TABLE scheduled_messages_new RENAME TO scheduled_messages")
+                    con.execute("""
+                        CREATE INDEX IF NOT EXISTS idx_scheduled_messages_next_run 
+                        ON scheduled_messages(next_run_at)
+                    """)
+                    con.commit()
+                except Exception:
+                    con.rollback()
+                    raise
+        except sqlite3.OperationalError:
+            # Table doesn't exist yet, that's fine
+            pass
+        
         con.commit()
         con.close()
     db_exec(_init)
