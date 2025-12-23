@@ -58,6 +58,8 @@ HELP_TEXT = """Commands:
 • weather / wx                      Get your current forecast (based on saved location)
 • I'm in <place> now                Update your location and get forecast
 • send me the weather at 7am everyday    Schedule daily weather reports
+• what do i have scheduled          Show your scheduled messages
+• last contact                      Show when we last talked
 
 Location examples (city/state is enough now):
 • I'm in Davis, CA now
@@ -72,6 +74,8 @@ Schedule examples:
 """
 
 WEATHER_COMMANDS = {"weather", "wx", "forecast", "temp"}
+LAST_CONTACT_COMMANDS = {"when did we last talk", "last contact", "when did we last contact", "last time we talked"}
+SCHEDULE_QUERY_COMMANDS = {"what do i have scheduled", "what's scheduled", "show my schedule", "list schedule", "what schedules", "my schedules"}
 
 IN_NOW_RE = re.compile(
     r"""^\s*(?:i'?m|i\s+am)?\s*in\s+(?P<loc>.+?)\s+now\s*$""",
@@ -94,6 +98,18 @@ def is_weather_cmd(text: str) -> bool:
     """Check if text is a weather command."""
     t = normalize_text(text).lower()
     return t in WEATHER_COMMANDS
+
+
+def is_last_contact_cmd(text: str) -> bool:
+    """Check if text is asking for last contact info."""
+    t = normalize_text(text).lower()
+    return any(cmd in t for cmd in LAST_CONTACT_COMMANDS)
+
+
+def is_schedule_query_cmd(text: str) -> bool:
+    """Check if text is asking about scheduled messages."""
+    t = normalize_text(text).lower()
+    return any(cmd in t for cmd in SCHEDULE_QUERY_COMMANDS)
 
 
 def extract_in_now_location(text: str) -> str | None:
@@ -264,8 +280,8 @@ def get_last_contact_info(handle_id: str) -> tuple[int, str] | None:
     return (gap_seconds, formatted)
 
 
-def reply_weather(handle_id: str, loc_label: str, lat: float, lon: float) -> None:
-    """Send a weather forecast reply with last contact info."""
+def reply_weather(handle_id: str, loc_label: str, lat: float, lon: float, include_last_contact: bool = False) -> None:
+    """Send a weather forecast reply. Optionally include last contact info."""
     # Parse location for wttr.in
     # loc_label should now be "City, State" format
     parts = [p.strip() for p in loc_label.split(",")]
@@ -281,14 +297,15 @@ def reply_weather(handle_id: str, loc_label: str, lat: float, lon: float) -> Non
     # Extract just the city name (not full address or state)
     city_name = extract_city_name(loc_label)
     
-    # Build message - format: "City Forecast:\n\n{weather}\n\n[ Last contact: ... ]"
+    # Build message - format: "City Forecast:\n\n{weather}"
     message = f"{city_name} Forecast:\n\n{wx}"
     
-    # Add last contact info if available (with empty line before it)
-    last_contact = get_last_contact_info(handle_id)
-    if last_contact:
-        _, formatted = last_contact
-        message += f"\n\n{formatted}"
+    # Add last contact info only if requested
+    if include_last_contact:
+        last_contact = get_last_contact_info(handle_id)
+        if last_contact:
+            _, formatted = last_contact
+            message += f"\n\n{formatted}"
     
     applescript_helpers.send_imessage(handle_id, message)
 
@@ -491,7 +508,73 @@ def handle_incoming(msg: message_polling.Incoming) -> None:
                 f"Sorry, I couldn't set up that schedule. ({e})"
             )
         return
-
+    
+    # Check for last contact query
+    if is_last_contact_cmd(msg.text):
+        last_contact = get_last_contact_info(msg.handle_id)
+        if last_contact:
+            _, formatted = last_contact
+            applescript_helpers.send_imessage(msg.handle_id, formatted)
+        else:
+            applescript_helpers.send_imessage(msg.handle_id, "We haven't talked recently enough to show last contact info.")
+        return
+    
+    # Check for schedule query
+    if is_schedule_query_cmd(msg.text):
+        schedules = scheduler.get_user_scheduled_messages(msg.handle_id)
+        if not schedules:
+            applescript_helpers.send_imessage(msg.handle_id, "You don't have any scheduled messages.")
+            return
+        
+        now = datetime.now(timezone.utc)
+        messages = []
+        for sched in schedules:
+            next_run = database.parse_iso(sched["next_run_at"])
+            if not next_run:
+                continue
+            
+            # Format next run time
+            local_next = next_run.astimezone()
+            time_str = local_next.strftime("%I:%M %p").lstrip("0")
+            date_str = local_next.strftime("%b %d")
+            
+            if sched["schedule_type"] == scheduler.SCHEDULE_DAILY:
+                if sched["schedule_time"]:
+                    schedule_time = dt_time.fromisoformat(sched["schedule_time"])
+                    time_display = schedule_time.strftime("%I:%M %p").lstrip("0")
+                    messages.append(f"• Daily weather at {time_display} (next: {date_str} at {time_str})")
+                else:
+                    messages.append(f"• Daily weather (next: {date_str} at {time_str})")
+            else:
+                messages.append(f"• One-time weather (next: {date_str} at {time_str})")
+        
+        response = "Your scheduled messages:\n" + "\n".join(messages)
+        applescript_helpers.send_imessage(msg.handle_id, response)
+        return
+    
+    # Unknown message - send friendly response with weather
+    p = database.get_person(msg.handle_id)
+    loc = p.get("location_text")
+    lat = p.get("lat")
+    lon = p.get("lon")
+    first_name = display_first_name(msg.handle_id)
+    
+    if loc and lat is not None and lon is not None:
+        # Get weather for friendly response
+        try:
+            parts = [p.strip() for p in loc.split(",")]
+            city = parts[0] if parts else loc
+            state = parts[1] if len(parts) > 1 and len(parts[1]) == 2 else None
+            forecast = weather.wttr_forecast(city, state, "US")
+            city_name = extract_city_name(loc)
+            response = f"Hi {first_name}! Looks like the weather forecast is {forecast} for {city_name}. Hope all is well with you!"
+        except Exception:
+            city_name = extract_city_name(loc)
+            response = f"Hi {first_name}! Hope all is well with you!"
+    else:
+        response = f"Hi {first_name}! Hope all is well with you!"
+    
+    applescript_helpers.send_imessage(msg.handle_id, response)
     return
 
 

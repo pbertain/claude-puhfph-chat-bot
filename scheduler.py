@@ -291,12 +291,18 @@ def add_scheduled_message(handle_id: str, message_type: str, schedule_time: Opti
 def get_due_scheduled_messages(now: Optional[datetime] = None) -> list[dict]:
     """
     Get all scheduled messages that are due to run.
+    Updates next_run_at immediately to prevent duplicate execution.
     """
     if now is None:
         now = datetime.now(timezone.utc)
     
     def _do():
         con = database.db_connect()
+        # Use a small buffer (1 second) to avoid immediate re-selection
+        # Also update next_run_at to a far future time temporarily to mark as processing
+        buffer_time = (now + timedelta(seconds=1)).isoformat()
+        temp_marker = (now + timedelta(days=365)).isoformat()  # Far future marker
+        
         rows = con.execute(
             """
             SELECT schedule_id, handle_id, message_type, schedule_time, schedule_type, next_run_at
@@ -304,8 +310,24 @@ def get_due_scheduled_messages(now: Optional[datetime] = None) -> list[dict]:
             WHERE next_run_at <= ?
             ORDER BY next_run_at ASC
             """,
-            (now.isoformat(),),
+            (buffer_time,),
         ).fetchall()
+        
+        # Immediately update next_run_at to prevent re-selection
+        # We'll calculate the real next_run_at after execution
+        schedule_ids = [row[0] for row in rows]
+        if schedule_ids:
+            placeholders = ','.join('?' * len(schedule_ids))
+            con.execute(
+                f"""
+                UPDATE scheduled_messages
+                SET next_run_at = ?, updated_at = ?
+                WHERE schedule_id IN ({placeholders})
+                """,
+                (temp_marker, database.now_iso(), *schedule_ids),
+            )
+            con.commit()
+        
         con.close()
         
         return [
@@ -344,8 +366,8 @@ def update_next_run(schedule_id: int, schedule_time_str: str | None, schedule_ty
     # Parse the time string back to time object
     schedule_time = time.fromisoformat(schedule_time_str)
     
-    # Calculate next run for recurring schedules (tz_str=None, now=now)
-    next_run = calculate_next_run(schedule_time, schedule_type, tz_str=None, now=now)
+    # Calculate next run for recurring schedules
+    next_run = calculate_next_run(schedule_time, schedule_type, tz_str=tz_str, now=now)
     
     def _do():
         con = database.db_connect()
@@ -372,6 +394,35 @@ def delete_scheduled_message(schedule_id: int) -> None:
         con.close()
     
     database.db_exec(_do)
+
+
+def get_user_scheduled_messages(handle_id: str) -> list[dict]:
+    """Get all scheduled messages for a user."""
+    def _do():
+        con = database.db_connect()
+        rows = con.execute(
+            """
+            SELECT schedule_id, message_type, schedule_time, schedule_type, next_run_at
+            FROM scheduled_messages
+            WHERE handle_id = ?
+            ORDER BY next_run_at ASC
+            """,
+            (handle_id,),
+        ).fetchall()
+        con.close()
+        
+        return [
+            {
+                "schedule_id": row[0],
+                "message_type": row[1],
+                "schedule_time": row[2],
+                "schedule_type": row[3],
+                "next_run_at": row[4],
+            }
+            for row in rows
+        ]
+    
+    return database.db_exec(_do)
 
 
 def get_scheduled_messages_for_handle(handle_id: str) -> list[dict]:
