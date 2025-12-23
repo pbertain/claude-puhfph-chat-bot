@@ -100,7 +100,7 @@ NAME_CHANGE_PATTERNS = ["change my name", "update my name", "my name is wrong", 
                         "correct my name", "my name should be", "update name"]
 
 IN_NOW_RE = re.compile(
-    r"""^\s*(?:i'?m|i\s+am)?\s*in\s+(?P<loc>.+?)\s+now\s*$""",
+    r"""^\s*(?:i'?m|i\s+am)\s+in\s+(?P<loc>.+?)(?:\s+now)?\s*$""",
     re.IGNORECASE,
 )
 
@@ -208,22 +208,34 @@ def extract_name_from_text(text: str) -> tuple[str | None, str | None]:
     """Extract first and last name from text like 'my name is John Doe' or 'John Doe'."""
     t = normalize_text(text).lower()
     
+    # Words that indicate this is just a request, not a name
+    command_words = {"change", "update", "fix", "correct", "wrong", "should", "want", "to", "my", "name", "is", "i", "am"}
+    
     # Remove common prefixes
-    prefixes = ["my name is", "i'm", "i am", "call me", "name is", "it's", "it is", "update my name to", "change my name to"]
+    prefixes = ["my name is", "i'm", "i am", "call me", "name is", "it's", "it is", "update my name to", "change my name to", "i want to change my name", "i want to update my name"]
     for prefix in prefixes:
         if t.startswith(prefix):
             t = t[len(prefix):].strip()
             break
     
-    # Split into parts
+    # If after removing prefix, we only have command words, no name was provided
     parts = t.split()
     if not parts:
         return None, None
     
-    if len(parts) == 1:
-        return parts[0].title(), None
+    # Filter out command words
+    name_parts = [p for p in parts if p not in command_words]
+    if not name_parts:
+        return None, None
+    
+    # If we only have single-letter words or pronouns, it's not a name
+    if all(len(p) <= 1 or p in {"i", "me", "you", "he", "she", "it", "we", "they"} for p in name_parts):
+        return None, None
+    
+    if len(name_parts) == 1:
+        return name_parts[0].title(), None
     else:
-        return parts[0].title(), " ".join(parts[1:]).title()
+        return name_parts[0].title(), " ".join(name_parts[1:]).title()
 
 
 def extract_in_now_location(text: str) -> str | None:
