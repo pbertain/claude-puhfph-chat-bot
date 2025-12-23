@@ -36,6 +36,15 @@ def main() -> int:
                 except Exception as e:
                     print(f"ERROR executing schedule {schedule['schedule_id']}: {e}", file=sys.stderr)
             
+            # Check for alarms that are due
+            now_iso = database.now_iso()
+            due_alarms = database.get_due_alarms(now_iso)
+            for alarm in due_alarms:
+                try:
+                    conversation.execute_alarm(alarm)
+                except Exception as e:
+                    print(f"ERROR executing alarm {alarm['alarm_id']}: {e}", file=sys.stderr)
+            
             # Check for new incoming messages
             inc = message_polling.get_latest_incoming_since(last_rowid)
             if inc is None:

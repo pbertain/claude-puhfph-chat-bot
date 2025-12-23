@@ -74,6 +74,7 @@ Scheduling:
 Other questions:
 • "What do I have scheduled?" or "Show my schedule"
 • "When did we last talk?" or "Last contact"
+• "Set an alarm to wake up" or "Remind me to call mom"
 
 Feel free to ask naturally - I understand conversational language!
 """
@@ -93,6 +94,11 @@ SCHEDULE_QUERY_KEYWORDS = {"what", "show", "list", "tell", "my", "have"}
 SCHEDULE_QUERY_QUESTIONS = {"what do i have scheduled", "what's scheduled", "show my schedule", 
                             "list my schedule", "what schedules", "my schedules", "what reminders",
                             "show my reminders", "what do i have scheduled"}
+
+# Alarm/reminder keywords
+ALARM_KEYWORDS = {"alarm", "remind", "reminder", "alert", "wake"}
+ALARM_PATTERNS = ["set an alarm", "set alarm", "create alarm", "set a reminder", "remind me", 
+                  "create reminder", "set reminder", "alarm for", "reminder for"]
 
 # Name change keywords
 NAME_CHANGE_KEYWORDS = {"change", "update", "wrong", "correct", "fix", "my name is", "name should be"}
@@ -245,6 +251,47 @@ def extract_in_now_location(text: str) -> str | None:
         return None
     loc = normalize_text(m.group("loc"))
     return loc if loc else None
+
+
+def is_alarm_cmd(text: str) -> bool:
+    """Check if text is requesting to set an alarm or reminder."""
+    t = normalize_text(text).lower()
+    
+    # Check for exact patterns
+    if any(pattern in t for pattern in ALARM_PATTERNS):
+        return True
+    
+    # Check for keywords that suggest alarm/reminder
+    has_alarm_keyword = any(kw in t for kw in ALARM_KEYWORDS)
+    has_action_keyword = any(kw in t for kw in ["set", "create", "make", "add"])
+    
+    if has_alarm_keyword and has_action_keyword:
+        return True
+    
+    return False
+
+
+def extract_alarm_title(text: str) -> str | None:
+    """Extract alarm/reminder title from text like 'set an alarm to wake up' or 'remind me to call mom'."""
+    t = normalize_text(text).lower()
+    
+    # Remove common prefixes
+    prefixes = ["set an alarm to", "set alarm to", "create alarm to", "set a reminder to", 
+                "remind me to", "create reminder to", "set reminder to", "alarm for", "reminder for",
+                "set an alarm", "set alarm", "create alarm", "set a reminder", "remind me",
+                "create reminder", "set reminder"]
+    
+    for prefix in sorted(prefixes, key=len, reverse=True):  # Sort by length, longest first
+        if prefix in t:
+            # Extract everything after the prefix
+            idx = t.find(prefix)
+            remaining = t[idx + len(prefix):].strip()
+            # Remove trailing "at" or "for" if present
+            remaining = remaining.lstrip("at for").strip()
+            if remaining:
+                return remaining.title()
+    
+    return None
 
 
 def extract_weather_for_location(text: str) -> str | None:
@@ -547,7 +594,106 @@ def handle_incoming(msg: message_polling.Incoming) -> None:
         applescript_helpers.send_imessage(msg.handle_id, f"Perfect! I've saved your location as {city_name}. You can ask me things like \"What's the weather?\" or \"How's the weather?\" anytime!")
         return
 
+    # Check for alarm creation states
+    if state == "need_alarm_time":
+        # User is providing the alarm time
+        temp_data = database.get_temp_data(msg.handle_id)
+        alarm_title = temp_data.get("alarm_title", "Alarm")
+        is_reminder = temp_data.get("is_reminder", False)
+        
+        # Try to parse time from message
+        schedule_info = scheduler.parse_schedule_command(msg.text)
+        if schedule_info and schedule_info.get("time"):
+            alert_time = schedule_info["time"]
+            alert_time_str = alert_time.strftime("%H:%M:%S")
+            temp_data["alert_time"] = alert_time_str
+            database.set_temp_data(msg.handle_id, temp_data)
+            database.set_state(msg.handle_id, "need_alarm_message")
+            first = display_first_name(msg.handle_id)
+            alarm_type = "REMINDER" if is_reminder else "ALARM"
+            applescript_helpers.send_imessage(msg.handle_id, f"Great! What message should I send for this {alarm_type.lower()}?")
+            return
+        else:
+            first = display_first_name(msg.handle_id)
+            applescript_helpers.send_imessage(msg.handle_id, f"Sorry {first}, I couldn't understand that time. Could you try again? For example: \"7am\", \"7:30pm\", or \"19:00\"")
+            return
+    
+    if state == "need_alarm_message":
+        # User is providing the alarm message
+        temp_data = database.get_temp_data(msg.handle_id)
+        alarm_title = temp_data.get("alarm_title", "Alarm")
+        alert_time_str = temp_data.get("alert_time")
+        is_reminder = temp_data.get("is_reminder", False)
+        
+        alert_message = normalize_text(msg.text)
+        temp_data["alert_message"] = alert_message
+        database.set_temp_data(msg.handle_id, temp_data)
+        database.set_state(msg.handle_id, "need_alarm_repeat")
+        first = display_first_name(msg.handle_id)
+        alarm_type = "REMINDER" if is_reminder else "ALARM"
+        applescript_helpers.send_imessage(msg.handle_id, f"Perfect! Should this {alarm_type.lower()} repeat daily? (yes/no)")
+        return
+    
+    if state == "need_alarm_repeat":
+        # User is answering if alarm should repeat daily
+        temp_data = database.get_temp_data(msg.handle_id)
+        alarm_title = temp_data.get("alarm_title", "Alarm")
+        alert_time_str = temp_data.get("alert_time")
+        alert_message = temp_data.get("alert_message", "")
+        is_reminder = temp_data.get("is_reminder", False)
+        
+        # Parse yes/no answer
+        t = normalize_text(msg.text).lower()
+        repeat_daily = t in {"yes", "y", "yeah", "yep", "sure", "daily", "everyday", "every day"}
+        
+        schedule_type = scheduler.SCHEDULE_DAILY if repeat_daily else scheduler.SCHEDULE_ONCE
+        
+        # Parse alert time and calculate next_run_at
+        alert_time = dt_time.fromisoformat(alert_time_str)
+        next_run = scheduler.calculate_next_run(alert_time, schedule_type, tz_str=None)
+        
+        # Create alarm
+        alarm_id = database.create_alarm(
+            msg.handle_id,
+            alarm_title,
+            alert_time_str,
+            alert_message,
+            schedule_type,
+            next_run.isoformat()
+        )
+        
+        # Clear temp data and reset state
+        database.set_temp_data(msg.handle_id, {})
+        database.set_state(msg.handle_id, "ready")
+        
+        # Send confirmation
+        first = display_first_name(msg.handle_id)
+        alarm_type = "REMINDER" if is_reminder else "ALARM"
+        time_str = alert_time.strftime("%I:%M %p").lstrip("0")
+        repeat_str = "daily" if repeat_daily else "once"
+        applescript_helpers.send_imessage(msg.handle_id, f"Got it {first}! I've set your {alarm_type.lower()} \"{alarm_title}\" for {time_str} ({repeat_str}).")
+        return
+
     # ready state:
+    # Check for alarm creation command
+    if is_alarm_cmd(msg.text):
+        alarm_title = extract_alarm_title(msg.text)
+        is_reminder = "remind" in normalize_text(msg.text).lower()
+        
+        if alarm_title:
+            # Store alarm title and type in temp_data
+            temp_data = {"alarm_title": alarm_title, "is_reminder": is_reminder}
+            database.set_temp_data(msg.handle_id, temp_data)
+            database.set_state(msg.handle_id, "need_alarm_time")
+            first = display_first_name(msg.handle_id)
+            alarm_type = "REMINDER" if is_reminder else "ALARM"
+            applescript_helpers.send_imessage(msg.handle_id, f"Great! What time should I set this {alarm_type.lower()} for? For example: \"7am\", \"7:30pm\", or \"19:00\"")
+            return
+        else:
+            first = display_first_name(msg.handle_id)
+            applescript_helpers.send_imessage(msg.handle_id, f"I'd be happy to set an alarm or reminder for you, {first}! What should I call it? For example: \"set an alarm to wake up\" or \"remind me to call mom\"")
+            return
+    
     # Check for "weather for [location]" pattern first
     weather_for_loc = extract_weather_for_location(msg.text)
     if weather_for_loc:
@@ -737,4 +883,43 @@ def execute_scheduled_weather(handle_id: str) -> None:
         # Skip if location not set
         return
     reply_weather(handle_id, loc, float(lat), float(lon))
+
+
+def execute_alarm(alarm_data: dict) -> None:
+    """Execute an alarm/reminder and send formatted message."""
+    handle_id = alarm_data["handle_id"]
+    alarm_title = alarm_data["alarm_title"]
+    alert_time_str = alarm_data["alert_time"]
+    alert_message = alarm_data["alert_message"]
+    schedule_type = alarm_data["schedule_type"]
+    
+    # Determine if it's an alarm or reminder based on title/keywords
+    is_reminder = "remind" in alarm_title.lower() or "reminder" in alarm_title.lower()
+    alarm_type = "REMINDER" if is_reminder else "ALARM"
+    
+    # Format time
+    alert_time = dt_time.fromisoformat(alert_time_str)
+    time_str = alert_time.strftime("%I:%M %p").lstrip("0")
+    
+    # Get current time for "Sent @ HH:MM - m/d/y"
+    now = datetime.now(timezone.utc).astimezone()
+    sent_time = now.strftime("%H:%M")
+    # Format date as m/d/y (remove leading zeros)
+    month = str(now.month)
+    day = str(now.day)
+    year = now.strftime("%y")
+    sent_date = f"{month}/{day}/{year}"
+    
+    # Format message as specified
+    message = f"{alarm_type}: {alarm_title}\nTime: {time_str}\nMessage: {alert_message}\n\nSent @ {sent_time} - {sent_date}"
+    
+    applescript_helpers.send_imessage(handle_id, message)
+    
+    # Update next run time or delete if one-time
+    if schedule_type == scheduler.SCHEDULE_ONCE:
+        database.delete_alarm(alarm_data["alarm_id"])
+    else:
+        # Calculate next run for daily alarms
+        next_run = scheduler.calculate_next_run(alert_time, schedule_type, tz_str=None)
+        database.update_alarm_next_run(alarm_data["alarm_id"], next_run.isoformat())
 
