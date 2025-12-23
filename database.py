@@ -13,10 +13,18 @@ import config
 def db_connect() -> sqlite3.Connection:
     """Connect to the profile database with appropriate settings."""
     # timeout helps with "database is locked"
-    con = sqlite3.connect(config.PROFILE_DB, timeout=5.0)
-    con.execute("PRAGMA journal_mode=WAL;")
-    con.execute("PRAGMA foreign_keys=ON;")
-    return con
+    try:
+        con = sqlite3.connect(config.PROFILE_DB, timeout=5.0)
+        con.execute("PRAGMA journal_mode=WAL;")
+        con.execute("PRAGMA foreign_keys=ON;")
+        return con
+    except sqlite3.OperationalError as e:
+        if "unable to open database file" in str(e).lower():
+            raise PermissionError(
+                f"Cannot create/access profile database: {config.PROFILE_DB}\n"
+                "Check that the directory exists and you have write permissions."
+            ) from e
+        raise
 
 
 def db_exec(fn, *, retries: int = 5, delay: float = 0.15):

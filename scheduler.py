@@ -5,6 +5,7 @@ Scheduler for recurring messages (e.g., daily weather reports).
 import re
 from datetime import datetime, time, timedelta, timezone
 from typing import Optional
+import pytz
 
 import database
 
@@ -14,12 +15,40 @@ SCHEDULE_DAILY = "daily"
 SCHEDULE_ONCE = "once"
 
 
-def parse_time(text: str) -> Optional[time]:
+# Timezone abbreviations mapping
+TZ_MAP = {
+    "pt": "America/Los_Angeles",
+    "pst": "America/Los_Angeles",
+    "pdt": "America/Los_Angeles",
+    "mt": "America/Denver",
+    "mst": "America/Denver",
+    "mdt": "America/Denver",
+    "ct": "America/Chicago",
+    "cst": "America/Chicago",
+    "cdt": "America/Chicago",
+    "et": "America/New_York",
+    "est": "America/New_York",
+    "edt": "America/New_York",
+}
+
+
+def parse_time(text: str, tz_str: Optional[str] = None) -> tuple[Optional[time], Optional[str]]:
     """
-    Parse time from text like "7am", "7:30pm", "19:00", "7:30 AM".
-    Returns a time object or None if parsing fails.
+    Parse time from text like "7am", "7:30pm", "19:00", "7:30 AM PT".
+    Returns (time object, timezone string) or (None, None) if parsing fails.
     """
     text = text.strip().lower()
+    
+    # Extract timezone if present
+    tz_abbr = None
+    for tz_key in TZ_MAP.keys():
+        if text.endswith(f" {tz_key}"):
+            tz_abbr = TZ_MAP[tz_key]
+            text = text[:-len(f" {tz_key}")].strip()
+            break
+    
+    # Use provided timezone or extracted one
+    timezone_str = tz_str or tz_abbr
     
     # Handle 24-hour format: "19:00", "7:30"
     if re.match(r'^\d{1,2}:\d{2}$', text):
@@ -28,7 +57,7 @@ def parse_time(text: str) -> Optional[time]:
             hour = int(parts[0])
             minute = int(parts[1])
             if 0 <= hour <= 23 and 0 <= minute <= 59:
-                return time(hour, minute)
+                return (time(hour, minute), timezone_str)
         except ValueError:
             pass
     
@@ -42,9 +71,9 @@ def parse_time(text: str) -> Optional[time]:
             period = match.group(3).lower()
             
             if hour < 1 or hour > 12:
-                return None
+                return (None, None)
             if minute < 0 or minute > 59:
-                return None
+                return (None, None)
             
             # Convert to 24-hour
             if period == "pm" and hour != 12:
@@ -52,31 +81,85 @@ def parse_time(text: str) -> Optional[time]:
             elif period == "am" and hour == 12:
                 hour = 0
             
-            return time(hour, minute)
+            return (time(hour, minute), timezone_str)
         except (ValueError, AttributeError):
             pass
+    
+    return (None, None)
+
+
+def parse_relative_time(text: str) -> Optional[timedelta]:
+    """
+    Parse relative time like "in 5 mins", "in 2 hours", "in 30 minutes".
+    Returns timedelta or None if parsing fails.
+    """
+    text = text.strip().lower()
+    
+    # Pattern: "in X (minute|min|mins|hour|hr|hrs|hour|hours)"
+    patterns = [
+        r'in\s+(\d+)\s+(minute|min|mins)\s*$',
+        r'in\s+(\d+)\s+(hour|hr|hrs|hours)\s*$',
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            try:
+                amount = int(match.group(1))
+                unit = match.group(2).lower()
+                
+                if unit in ("minute", "min", "mins"):
+                    return timedelta(minutes=amount)
+                elif unit in ("hour", "hr", "hrs", "hours"):
+                    return timedelta(hours=amount)
+            except (ValueError, IndexError):
+                pass
     
     return None
 
 
 def parse_schedule_command(text: str) -> Optional[dict]:
     """
-    Parse a schedule command like "send me the weather at 7am everyday".
-    Returns dict with 'time', 'schedule', 'message_type' or None if not a schedule command.
+    Parse a schedule command like:
+    - "send me the weather at 7am everyday"
+    - "text me the weather in 5 mins"
+    - "send me the weather at 7:45am PT"
+    
+    Returns dict with 'time', 'schedule', 'message_type', 'timezone' or None if not a schedule command.
     """
+    text_orig = text
     text = text.strip().lower()
     
-    # Pattern: "send me [something] at [time] [frequency]"
+    # Check for relative time first: "text me the weather in 5 mins"
+    relative_patterns = [
+        r'(?:text|send)\s+me\s+(?:the\s+)?weather\s+in\s+(\d+\s+(?:minute|min|mins|hour|hr|hrs|hours))',
+        r'(?:text|send)\s+(?:me\s+)?(?:the\s+)?weather\s+in\s+(\d+\s+(?:minute|min|mins|hour|hr|hrs|hours))',
+    ]
+    
+    for pattern in relative_patterns:
+        match = re.search(pattern, text)
+        if match:
+            relative_str = match.group(1)
+            delta = parse_relative_time(f"in {relative_str}")
+            if delta:
+                return {
+                    "relative_delta": delta,
+                    "schedule": SCHEDULE_ONCE,
+                    "message_type": "weather",
+                    "timezone": None,
+                }
+    
+    # Pattern: "send me [something] at [time] [timezone] [frequency]"
     # Variations:
     # - "send me the weather at 7am everyday"
-    # - "send me weather at 7:30pm daily"
-    # - "send weather at 7am"
+    # - "send me weather at 7:30pm PT daily"
+    # - "send weather at 7:45am PST"
     # - "schedule weather at 7am everyday"
     
     patterns = [
-        r'send\s+me\s+(?:the\s+)?weather\s+at\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\s*(everyday|daily|once)?',
-        r'send\s+(?:me\s+)?(?:the\s+)?weather\s+at\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\s*(everyday|daily|once)?',
-        r'schedule\s+(?:me\s+)?(?:the\s+)?weather\s+at\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\s*(everyday|daily|once)?',
+        r'(?:text|send)\s+me\s+(?:the\s+)?weather\s+at\s+([\d:]+(?:\s*(?:am|pm))?(?:\s+(?:pt|pst|pdt|mt|mst|mdt|ct|cst|cdt|et|est|edt))?)\s*(everyday|daily|once)?',
+        r'(?:text|send)\s+(?:me\s+)?(?:the\s+)?weather\s+at\s+([\d:]+(?:\s*(?:am|pm))?(?:\s+(?:pt|pst|pdt|mt|mst|mdt|ct|cst|cdt|et|est|edt))?)\s*(everyday|daily|once)?',
+        r'schedule\s+(?:me\s+)?(?:the\s+)?weather\s+at\s+([\d:]+(?:\s*(?:am|pm))?(?:\s+(?:pt|pst|pdt|mt|mst|mdt|ct|cst|cdt|et|est|edt))?)\s*(everyday|daily|once)?',
     ]
     
     for pattern in patterns:
@@ -85,7 +168,7 @@ def parse_schedule_command(text: str) -> Optional[dict]:
             time_str = match.group(1).strip()
             frequency = (match.group(2) or "").strip().lower() if match.groups() > 1 else ""
             
-            parsed_time = parse_time(time_str)
+            parsed_time, tz = parse_time(time_str)
             if not parsed_time:
                 return None
             
@@ -102,37 +185,69 @@ def parse_schedule_command(text: str) -> Optional[dict]:
                 "time": parsed_time,
                 "schedule": schedule,
                 "message_type": "weather",
+                "timezone": tz,
             }
     
     return None
 
 
-def calculate_next_run(schedule_time: time, schedule_type: str, now: Optional[datetime] = None) -> datetime:
+def calculate_next_run(schedule_time: time, schedule_type: str, tz_str: Optional[str] = None, now: Optional[datetime] = None) -> datetime:
     """
     Calculate the next run time for a scheduled message.
+    If tz_str is provided, interpret schedule_time in that timezone.
     """
     if now is None:
         now = datetime.now(timezone.utc)
     
-    # Convert schedule_time to datetime today in local timezone
-    # We'll use UTC for storage but need to handle local time for scheduling
-    local_now = now.astimezone()
-    scheduled_dt = datetime.combine(local_now.date(), schedule_time)
-    
-    # If the time has already passed today, schedule for tomorrow
-    if scheduled_dt <= local_now:
-        scheduled_dt += timedelta(days=1)
-    
-    # Convert back to UTC for storage
-    return scheduled_dt.astimezone(timezone.utc)
+    if tz_str:
+        # Use specified timezone
+        tz = pytz.timezone(tz_str)
+        tz_now = now.astimezone(tz)
+        scheduled_dt = datetime.combine(tz_now.date(), schedule_time)
+        scheduled_dt = tz.localize(scheduled_dt)
+        
+        # If the time has already passed today, schedule for tomorrow
+        if scheduled_dt <= tz_now:
+            scheduled_dt += timedelta(days=1)
+        
+        # Convert back to UTC for storage
+        return scheduled_dt.astimezone(timezone.utc)
+    else:
+        # Use local timezone
+        local_now = now.astimezone()
+        scheduled_dt = datetime.combine(local_now.date(), schedule_time)
+        
+        # If the time has already passed today, schedule for tomorrow
+        if scheduled_dt <= local_now:
+            scheduled_dt += timedelta(days=1)
+        
+        # Convert back to UTC for storage
+        return scheduled_dt.astimezone(timezone.utc)
 
 
-def add_scheduled_message(handle_id: str, message_type: str, schedule_time: time, schedule_type: str) -> int:
+def calculate_next_run_relative(delta: timedelta, now: Optional[datetime] = None) -> datetime:
+    """Calculate next run time from a relative timedelta."""
+    if now is None:
+        now = datetime.now(timezone.utc)
+    return now + delta
+
+
+def add_scheduled_message(handle_id: str, message_type: str, schedule_time: Optional[time] = None, 
+                         schedule_type: str = SCHEDULE_ONCE, relative_delta: Optional[timedelta] = None,
+                         tz_str: Optional[str] = None) -> int:
     """
     Add a scheduled message to the database.
+    Either schedule_time (for absolute times) or relative_delta (for relative times) must be provided.
     Returns the schedule_id.
     """
-    next_run = calculate_next_run(schedule_time, schedule_type)
+    if relative_delta:
+        next_run = calculate_next_run_relative(relative_delta)
+        schedule_time_str = None  # Not applicable for relative times
+    elif schedule_time:
+        next_run = calculate_next_run(schedule_time, schedule_type, tz_str)
+        schedule_time_str = schedule_time.strftime("%H:%M:%S")
+    else:
+        raise ValueError("Either schedule_time or relative_delta must be provided")
     
     def _do():
         con = database.db_connect()
@@ -145,7 +260,7 @@ def add_scheduled_message(handle_id: str, message_type: str, schedule_time: time
             (
                 handle_id,
                 message_type,
-                schedule_time.strftime("%H:%M:%S"),
+                schedule_time_str,
                 schedule_type,
                 next_run.isoformat(),
                 database.now_iso(),
@@ -157,7 +272,7 @@ def add_scheduled_message(handle_id: str, message_type: str, schedule_time: time
         con.close()
         return schedule_id
     
-    return database._db_exec(_do)
+    return database.db_exec(_do)
 
 
 def get_due_scheduled_messages(now: Optional[datetime] = None) -> list[dict]:
@@ -192,7 +307,7 @@ def get_due_scheduled_messages(now: Optional[datetime] = None) -> list[dict]:
             for row in rows
         ]
     
-    return database._db_exec(_do)
+    return database.db_exec(_do)
 
 
 def update_next_run(schedule_id: int, schedule_time_str: str, schedule_type: str) -> None:
@@ -266,5 +381,5 @@ def get_scheduled_messages_for_handle(handle_id: str) -> list[dict]:
             for row in rows
         ]
     
-    return database._db_exec(_do)
+    return database.db_exec(_do)
 

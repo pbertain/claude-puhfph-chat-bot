@@ -34,10 +34,24 @@ def write_last_rowid(rowid: int) -> None:
 def get_latest_incoming_since(last_rowid: int) -> Optional[Incoming]:
     """Get the latest incoming message since the given row ID."""
     if not config.CHAT_DB.exists():
-        raise FileNotFoundError(f"Missing Messages DB: {config.CHAT_DB}")
+        raise FileNotFoundError(
+            f"Missing Messages DB: {config.CHAT_DB}\n"
+            "Make sure Messages app has been used at least once, and grant Full Disk Access "
+            "to Terminal (or your Python interpreter) in System Settings > Privacy & Security."
+        )
 
     uri = f"file:{config.CHAT_DB}?mode=ro"
-    con = sqlite3.connect(uri, uri=True)
+    try:
+        con = sqlite3.connect(uri, uri=True)
+    except sqlite3.OperationalError as e:
+        if "unable to open database file" in str(e).lower():
+            raise PermissionError(
+                f"Cannot access Messages database: {config.CHAT_DB}\n"
+                "This usually means you need to grant Full Disk Access permission.\n"
+                "Go to: System Settings > Privacy & Security > Full Disk Access\n"
+                "Add Terminal (or your Python interpreter) and restart the app."
+            ) from e
+        raise
     con.row_factory = sqlite3.Row
 
     row = con.execute(

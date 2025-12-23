@@ -126,15 +126,58 @@ def set_location(handle_id: str, loc: str) -> tuple[float, float, str]:
     return lat, lon, pretty
 
 
+def get_last_contact_info(handle_id: str) -> tuple[int, str] | None:
+    """Get last contact time info. Returns (seconds, formatted_string) or None."""
+    meta = database.get_convo_meta(handle_id)
+    last_incoming = database.parse_iso(meta.get("last_incoming_at") or "")
+    
+    if not last_incoming:
+        return None
+    
+    now = datetime.now(timezone.utc)
+    gap_seconds = int((now - last_incoming).total_seconds())
+    
+    if gap_seconds < 60:
+        return None  # Too recent to show
+    
+    hours = gap_seconds // 3600
+    minutes = (gap_seconds % 3600) // 60
+    
+    if hours > 0:
+        formatted = f"{hours} hr{'s' if hours != 1 else ''}, {minutes} min{'s' if minutes != 1 else ''}"
+    else:
+        formatted = f"{minutes} min{'s' if minutes != 1 else ''}"
+    
+    return (gap_seconds, formatted)
+
+
 def reply_weather(handle_id: str, loc_label: str, lat: float, lon: float) -> None:
-    """Send a weather forecast reply."""
+    """Send a weather forecast reply with last contact info."""
     first = display_first_name(handle_id)
     greeting = time_of_day_greeting(datetime.now())
+    
+    # Parse location for wttr.in
+    # loc_label format: "City, State, Country" or "City, Country"
+    parts = [p.strip() for p in loc_label.split(",")]
+    city = parts[0] if parts else loc_label
+    state = parts[1] if len(parts) > 1 and len(parts[1]) == 2 else None
+    country = parts[-1] if len(parts) > 1 else "US"
+    
     try:
-        wx = weather.nws_forecast_one_liner(lat, lon)
+        wx = weather.wttr_forecast(city, state, country)
     except Exception as e:
         wx = f"Weather lookup failed ({e})"
-    applescript_helpers.send_imessage(handle_id, f"{greeting} Hello {first} — forecast for {loc_label}:\n\n{wx}")
+    
+    # Build message
+    message = f"{greeting}, {first}.\nThe forecast for {loc_label} is:\n\n{wx}"
+    
+    # Add last contact info if available
+    last_contact = get_last_contact_info(handle_id)
+    if last_contact:
+        _, formatted = last_contact
+        message += f"\n\n[ Last contact: {formatted} ]"
+    
+    applescript_helpers.send_imessage(handle_id, message)
 
 
 def maybe_send_welcome_back(handle_id: str) -> None:
@@ -167,7 +210,8 @@ def handle_incoming(msg: message_polling.Incoming) -> None:
     person = database.get_person(msg.handle_id)
     database.update_person(msg.handle_id, last_seen_at=database.now_iso())
 
-    maybe_send_welcome_back(msg.handle_id)
+    # Don't send separate welcome back - it's now included in weather replies
+    # maybe_send_welcome_back(msg.handle_id)
     database.set_convo_meta(msg.handle_id, last_incoming_at=database.now_iso())
 
     if not msg.text:
@@ -256,24 +300,60 @@ def handle_incoming(msg: message_polling.Incoming) -> None:
             return
         
         try:
-            schedule_id = scheduler.add_scheduled_message(
-                msg.handle_id,
-                schedule_info["message_type"],
-                schedule_info["time"],
-                schedule_info["schedule"],
-            )
-            first = display_first_name(msg.handle_id)
-            time_str = schedule_info["time"].strftime("%I:%M %p").lstrip("0")
-            if schedule_info["schedule"] == scheduler.SCHEDULE_DAILY:
+            # Handle relative time scheduling
+            if "relative_delta" in schedule_info:
+                schedule_id = scheduler.add_scheduled_message(
+                    msg.handle_id,
+                    schedule_info["message_type"],
+                    schedule_type=schedule_info["schedule"],
+                    relative_delta=schedule_info["relative_delta"],
+                )
+                first = display_first_name(msg.handle_id)
+                delta = schedule_info["relative_delta"]
+                minutes = int(delta.total_seconds() / 60)
+                hours = int(delta.total_seconds() / 3600)
+                if hours > 0:
+                    time_desc = f"{hours} hour{'s' if hours != 1 else ''}"
+                    if minutes % 60 > 0:
+                        time_desc += f" {minutes % 60} minute{'s' if minutes % 60 != 1 else ''}"
+                else:
+                    time_desc = f"{minutes} minute{'s' if minutes != 1 else ''}"
                 applescript_helpers.send_imessage(
                     msg.handle_id,
-                    f"Got it, {first}! I'll send you the weather at {time_str} every day."
+                    f"Got it, {first}! I'll send you the weather in {time_desc}."
                 )
             else:
-                applescript_helpers.send_imessage(
+                # Handle absolute time scheduling
+                schedule_id = scheduler.add_scheduled_message(
                     msg.handle_id,
-                    f"Got it, {first}! I'll send you the weather at {time_str}."
+                    schedule_info["message_type"],
+                    schedule_time=schedule_info["time"],
+                    schedule_type=schedule_info["schedule"],
+                    tz_str=schedule_info.get("timezone"),
                 )
+                first = display_first_name(msg.handle_id)
+                time_str = schedule_info["time"].strftime("%I:%M %p").lstrip("0")
+                tz_part = ""
+                if schedule_info.get("timezone"):
+                    # Extract timezone abbreviation from timezone string
+                    tz_abbr = None
+                    for abbr, tz_name in scheduler.TZ_MAP.items():
+                        if tz_name == schedule_info["timezone"]:
+                            tz_abbr = abbr.upper()
+                            break
+                    if tz_abbr:
+                        tz_part = f" {tz_abbr}"
+                
+                if schedule_info["schedule"] == scheduler.SCHEDULE_DAILY:
+                    applescript_helpers.send_imessage(
+                        msg.handle_id,
+                        f"Got it, {first}! I'll send you the weather at {time_str}{tz_part} every day."
+                    )
+                else:
+                    applescript_helpers.send_imessage(
+                        msg.handle_id,
+                        f"Got it, {first}! I'll send you the weather at {time_str}{tz_part}."
+                    )
         except Exception as e:
             applescript_helpers.send_imessage(
                 msg.handle_id,
