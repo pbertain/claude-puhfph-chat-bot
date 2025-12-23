@@ -178,7 +178,7 @@ def parse_schedule_command(text: str) -> Optional[dict]:
         match = re.search(pattern, text)
         if match:
             time_str = match.group(1).strip()
-            frequency = (match.group(2) or "").strip().lower() if match.groups() > 1 else ""
+            frequency = (match.group(2) or "").strip().lower() if len(match.groups()) > 1 else ""
             
             parsed_time, tz = parse_time(time_str)
             if not parsed_time:
@@ -215,8 +215,9 @@ def calculate_next_run(schedule_time: time, schedule_type: str, tz_str: Optional
         # Use specified timezone
         tz = pytz.timezone(tz_str)
         tz_now = now.astimezone(tz)
-        scheduled_dt = datetime.combine(tz_now.date(), schedule_time)
-        scheduled_dt = tz.localize(scheduled_dt)
+        # Create naive datetime, then localize it
+        scheduled_dt_naive = datetime.combine(tz_now.date(), schedule_time)
+        scheduled_dt = tz.localize(scheduled_dt_naive)
         
         # If the time has already passed today, schedule for tomorrow
         if scheduled_dt <= tz_now:
@@ -322,10 +323,10 @@ def get_due_scheduled_messages(now: Optional[datetime] = None) -> list[dict]:
     return database.db_exec(_do)
 
 
-def update_next_run(schedule_id: int, schedule_time_str: str, schedule_type: str) -> None:
+def update_next_run(schedule_id: int, schedule_time_str: str | None, schedule_type: str) -> None:
     """
     Update the next_run_at for a scheduled message after it has been executed.
-    schedule_time_str should be in "HH:MM:SS" format.
+    schedule_time_str should be in "HH:MM:SS" format, or None for relative time schedules.
     """
     now = datetime.now(timezone.utc)
     
@@ -334,11 +335,17 @@ def update_next_run(schedule_id: int, schedule_time_str: str, schedule_type: str
         delete_scheduled_message(schedule_id)
         return
     
+    # If schedule_time_str is None, this is a relative time schedule that shouldn't recur
+    # (but we already handled SCHEDULE_ONCE above, so this shouldn't happen)
+    if schedule_time_str is None:
+        delete_scheduled_message(schedule_id)
+        return
+    
     # Parse the time string back to time object
     schedule_time = time.fromisoformat(schedule_time_str)
     
-    # Calculate next run for recurring schedules
-    next_run = calculate_next_run(schedule_time, schedule_type, now)
+    # Calculate next run for recurring schedules (tz_str=None, now=now)
+    next_run = calculate_next_run(schedule_time, schedule_type, tz_str=None, now=now)
     
     def _do():
         con = database.db_connect()
