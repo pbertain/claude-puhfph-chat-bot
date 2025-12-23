@@ -288,8 +288,37 @@ def extract_alarm_title(text: str) -> str | None:
             remaining = t[idx + len(prefix):].strip()
             # Remove trailing "at" or "for" if present
             remaining = remaining.lstrip("at for").strip()
+            
+            # Check if remaining looks like a time (e.g., "2pm", "14:00", "at 2pm")
+            # If so, don't use it as a title
+            import re
+            if re.match(r'^at\s+\d+|^\d+.*(pm|am|:\d{2})', remaining):
+                return None
+            
             if remaining:
                 return remaining.title()
+    
+    return None
+
+
+def extract_time_from_text(text: str) -> str | None:
+    """Extract time string from text like 'remind me at 2pm' or 'at 14:00'."""
+    import re
+    t = normalize_text(text).lower()
+    
+    # Pattern: "at 2pm", "at 14:00", "at 7:30pm", etc.
+    # Look for "at" followed by time patterns
+    patterns = [
+        r'at\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm))',  # "at 2pm", "at 7:30pm"
+        r'at\s+(\d{1,2}:\d{2})',  # "at 14:00", "at 7:30"
+        r'(\d{1,2}(?::\d{2})?\s*(?:am|pm))',  # Just "2pm", "7:30pm" (if no "at")
+        r'(\d{1,2}:\d{2})',  # Just "14:00" (if no "at")
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, t)
+        if match:
+            return match.group(1).strip()
     
     return None
 
@@ -601,12 +630,12 @@ def handle_incoming(msg: message_polling.Incoming) -> None:
         alarm_title = temp_data.get("alarm_title", "Alarm")
         is_reminder = temp_data.get("is_reminder", False)
         
-        # Try to parse time from message
-        schedule_info = scheduler.parse_schedule_command(msg.text)
-        if schedule_info and schedule_info.get("time"):
-            alert_time = schedule_info["time"]
+        # Try to parse time directly from message using parse_time
+        alert_time, tz_str = scheduler.parse_time(msg.text)
+        if alert_time:
             alert_time_str = alert_time.strftime("%H:%M:%S")
             temp_data["alert_time"] = alert_time_str
+            temp_data["timezone"] = tz_str  # Store timezone if provided
             database.set_temp_data(msg.handle_id, temp_data)
             database.set_state(msg.handle_id, "need_alarm_message")
             first = display_first_name(msg.handle_id)
@@ -650,7 +679,8 @@ def handle_incoming(msg: message_polling.Incoming) -> None:
         
         # Parse alert time and calculate next_run_at
         alert_time = dt_time.fromisoformat(alert_time_str)
-        next_run = scheduler.calculate_next_run(alert_time, schedule_type, tz_str=None)
+        tz_str = temp_data.get("timezone")  # Get timezone if it was provided
+        next_run = scheduler.calculate_next_run(alert_time, schedule_type, tz_str=tz_str)
         
         # Create alarm
         alarm_id = database.create_alarm(
@@ -677,9 +707,37 @@ def handle_incoming(msg: message_polling.Incoming) -> None:
     # ready state:
     # Check for alarm creation command
     if is_alarm_cmd(msg.text):
-        alarm_title = extract_alarm_title(msg.text)
         is_reminder = "remind" in normalize_text(msg.text).lower()
         
+        # Try to extract time string from the command first (e.g., "remind me at 2pm")
+        time_str = extract_time_from_text(msg.text)
+        
+        # Extract title, but remove time-related parts
+        alarm_title = extract_alarm_title(msg.text)
+        
+        # If we found a time string in the command, parse it
+        if time_str:
+            alert_time, tz_str = scheduler.parse_time(time_str)
+            if alert_time:
+                alert_time_str = alert_time.strftime("%H:%M:%S")
+                # Use extracted title or default
+                if not alarm_title:
+                    alarm_title = "Reminder" if is_reminder else "Alarm"
+                
+                temp_data = {
+                    "alarm_title": alarm_title,
+                    "alert_time": alert_time_str,
+                    "is_reminder": is_reminder,
+                    "timezone": tz_str
+                }
+                database.set_temp_data(msg.handle_id, temp_data)
+                database.set_state(msg.handle_id, "need_alarm_message")
+                first = display_first_name(msg.handle_id)
+                alarm_type = "REMINDER" if is_reminder else "ALARM"
+                applescript_helpers.send_imessage(msg.handle_id, f"Great! What message should I send for this {alarm_type.lower()}?")
+                return
+        
+        # No time found - ask for time first
         if alarm_title:
             # Store alarm title and type in temp_data
             temp_data = {"alarm_title": alarm_title, "is_reminder": is_reminder}
