@@ -105,6 +105,26 @@ def extract_in_now_location(text: str) -> str | None:
     return loc if loc else None
 
 
+def extract_weather_for_location(text: str) -> str | None:
+    """Extract location from "send me the weather for <location>" pattern."""
+    # Patterns: "weather for Portland, OR", "weather for Portland OR", etc.
+    patterns = [
+        r'(?:send|text)\s+(?:me\s+)?(?:the\s+)?weather\s+for\s+(.+?)(?:\s+at\s+|\s+in\s+|\s+everyday|\s+daily|\s+once|$)',
+        r'weather\s+for\s+(.+?)(?:\s+at\s+|\s+in\s+|\s+everyday|\s+daily|\s+once|$)',
+    ]
+    
+    text_lower = text.lower()
+    for pattern in patterns:
+        match = re.search(pattern, text_lower)
+        if match:
+            loc = match.group(1).strip()
+            # Remove trailing punctuation
+            loc = loc.rstrip('.,!?')
+            return normalize_text(loc) if loc else None
+    
+    return None
+
+
 # ------------ conversation logic ------------
 
 def display_first_name(handle_id: str) -> str:
@@ -128,6 +148,58 @@ def format_city_state(loc_label: str) -> str:
         return f"{city}, {state}"
     # Fallback if format is unexpected
     return loc_label.title()
+
+
+def extract_city_name(loc_label: str) -> str:
+    """Extract just the city name from location text (handles addresses like '1602 Madrone Ln, DAVIS')."""
+    # Split by comma and find the city name
+    parts = [p.strip() for p in loc_label.split(",")]
+    
+    if len(parts) >= 2:
+        # Look for ZIP code (5 digits) first, then state abbreviation (2 uppercase letters)
+        # City is typically right before the state
+        for i in range(len(parts) - 1, -1, -1):
+            part = parts[i].strip()
+            # Check if this part is a ZIP code (5 digits)
+            if len(part) == 5 and part.isdigit():
+                # ZIP found - city is 2 parts back (before state)
+                if i >= 2:
+                    city = parts[i - 2].strip()
+                    # If city part has numbers, it might be an address - look further back
+                    if any(char.isdigit() for char in city):
+                        # Look backwards for a part without numbers
+                        for j in range(i - 3, -1, -1):
+                            candidate = parts[j].strip()
+                            if not any(char.isdigit() for char in candidate):
+                                city = candidate
+                                break
+                    return city.title()
+            # Check if this part is a state abbreviation (2 uppercase letters)
+            elif len(part) == 2 and part.isalpha() and part.isupper():
+                # State found - city is the previous part
+                if i > 0:
+                    city = parts[i - 1].strip()
+                    # If city part has numbers, it might be an address - look further back
+                    if any(char.isdigit() for char in city):
+                        # Look backwards for a part without numbers
+                        for j in range(i - 2, -1, -1):
+                            candidate = parts[j].strip()
+                            if not any(char.isdigit() for char in candidate):
+                                city = candidate
+                                break
+                    return city.title()
+        
+        # If no state/ZIP found, try to find city by looking for parts without numbers
+        # Usually city is one of the later parts (not the first which is often street address)
+        for part in reversed(parts):
+            if not any(char.isdigit() for char in part):
+                return part.title()
+        
+        # Fallback: return second-to-last part (often city)
+        return parts[-2].title() if len(parts) >= 2 else parts[0].title()
+    
+    # Fallback: return first part or whole string
+    return parts[0].title() if parts else loc_label.title()
 
 
 def set_location(handle_id: str, loc: str) -> tuple[float, float, str]:
@@ -206,11 +278,11 @@ def reply_weather(handle_id: str, loc_label: str, lat: float, lon: float) -> Non
     except Exception as e:
         wx = f"Weather lookup failed ({e})"
     
-    # Format location with proper case
-    city_state = format_city_state(loc_label)
+    # Extract just the city name (not full address or state)
+    city_name = extract_city_name(loc_label)
     
-    # Build message - format: "City, State Forecast:\n\n{weather}\n\n[ Last contact: ... ]"
-    message = f"{city_state} Forecast:\n\n{wx}"
+    # Build message - format: "City Forecast:\n\n{weather}\n\n[ Last contact: ... ]"
+    message = f"{city_name} Forecast:\n\n{wx}"
     
     # Add last contact info if available (with empty line before it)
     last_contact = get_last_contact_info(handle_id)
@@ -317,6 +389,18 @@ def handle_incoming(msg: message_polling.Incoming) -> None:
         return
 
     # ready state:
+    # Check for "weather for [location]" pattern first
+    weather_for_loc = extract_weather_for_location(msg.text)
+    if weather_for_loc:
+        # User specified a location - geocode it and send weather (don't update stored location)
+        try:
+            lat, lon, pretty = geocode.geocode_location(weather_for_loc)
+            reply_weather(msg.handle_id, pretty, lat, lon)
+            return
+        except Exception as e:
+            applescript_helpers.send_imessage(msg.handle_id, f"Sorry — I couldn't find that location. Try: \"Portland, OR\". ({e})")
+            return
+    
     if is_weather_cmd(msg.text):
         p = database.get_person(msg.handle_id)
         loc = p.get("location_text")
@@ -359,11 +443,13 @@ def handle_incoming(msg: message_polling.Incoming) -> None:
                         time_desc += f" {minutes % 60} minute{'s' if minutes % 60 != 1 else ''}"
                 else:
                     time_desc = f"{minutes} minute{'s' if minutes != 1 else ''}"
-                # Format city name in title case
-                city_state = format_city_state(loc)
+                # Extract just the city name (not full address)
+                city_name = extract_city_name(loc)
+                # Use "mins" instead of "minutes" for consistency
+                time_desc_short = f"{minutes} min{'s' if minutes != 1 else ''}" if minutes < 60 else time_desc
                 applescript_helpers.send_imessage(
                     msg.handle_id,
-                    f"Weather for {city_state} will be sent in {time_desc}."
+                    f"Weather for {city_name} will be sent in {time_desc_short}."
                 )
             else:
                 # Handle absolute time scheduling
@@ -387,17 +473,17 @@ def handle_incoming(msg: message_polling.Incoming) -> None:
                     if tz_abbr:
                         tz_part = f" {tz_abbr}"
                 
-                # Format city name in title case
-                city_state = format_city_state(loc)
+                # Extract just the city name (not full address)
+                city_name = extract_city_name(loc)
                 if schedule_info["schedule"] == scheduler.SCHEDULE_DAILY:
                     applescript_helpers.send_imessage(
                         msg.handle_id,
-                        f"Weather for {city_state} will be sent at {time_str}{tz_part} every day."
+                        f"Weather for {city_name} will be sent at {time_str}{tz_part} every day."
                     )
                 else:
                     applescript_helpers.send_imessage(
                         msg.handle_id,
-                        f"Weather for {city_state} will be sent at {time_str}{tz_part}."
+                        f"Weather for {city_name} will be sent at {time_str}{tz_part}."
                     )
         except Exception as e:
             applescript_helpers.send_imessage(
