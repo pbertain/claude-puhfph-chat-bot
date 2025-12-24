@@ -347,7 +347,7 @@ def get_due_scheduled_messages(now: Optional[datetime] = None) -> list[dict]:
     return database.db_exec(_do)
 
 
-def update_next_run(schedule_id: int, schedule_time_str: str | None, schedule_type: str, tz_str: Optional[str] = None) -> None:
+def update_next_run(schedule_id: int, schedule_time_str: Optional[str], schedule_type: str, tz_str: Optional[str] = None) -> None:
     """
     Update the next_run_at for a scheduled message after it has been executed.
     schedule_time_str should be in "HH:MM:SS" format, or None for relative time schedules.

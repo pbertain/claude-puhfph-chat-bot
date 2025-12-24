@@ -363,7 +363,7 @@ def get_convo_meta(handle_id: str) -> dict:
     return db_exec(_do)
 
 
-def set_convo_meta(handle_id: str, *, last_incoming_at: str | None = None, last_welcome_at: str | None = None) -> None:
+def set_convo_meta(handle_id: str, *, last_incoming_at: Optional[str] = None, last_welcome_at: Optional[str] = None) -> None:
     """Update conversation metadata timestamps."""
     sets = []
     vals: list[str] = []

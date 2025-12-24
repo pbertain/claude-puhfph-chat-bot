@@ -17,7 +17,7 @@ def normalize_text(s: str) -> str:
     return " ".join((s or "").strip().split())
 
 
-def parse_city_state(loc: str) -> tuple[str, str | None]:
+def parse_city_state(loc: str) -> tuple[str, Optional[str]]:
     """
     Parse city and state from location string.
     Accepts:
@@ -34,7 +34,7 @@ def parse_city_state(loc: str) -> tuple[str, str | None]:
     return loc, None
 
 
-def open_meteo_geocode(loc: str, *, country_code: str | None = config.DEFAULT_COUNTRY_CODE) -> tuple[float, float, str]:
+def open_meteo_geocode(loc: str, *, country_code: Optional[str] = config.DEFAULT_COUNTRY_CODE) -> tuple[float, float, str]:
     """
     Open-Meteo geocoding:
       https://geocoding-api.open-meteo.com/v1/search?name=...&count=...&country_code=...

@@ -4,6 +4,7 @@ Conversation state machine and message handling logic.
 """
 import re
 from datetime import datetime, timezone
+from typing import Optional
 
 import applescript_helpers
 import config
@@ -210,7 +211,7 @@ def is_name_change_cmd(text: str) -> bool:
     return False
 
 
-def extract_name_from_text(text: str) -> tuple[str | None, str | None]:
+def extract_name_from_text(text: str) -> tuple[Optional[str], Optional[str]]:
     """Extract first and last name from text like 'my name is John Doe' or 'John Doe'."""
     t = normalize_text(text).lower()
     
@@ -244,7 +245,7 @@ def extract_name_from_text(text: str) -> tuple[str | None, str | None]:
         return name_parts[0].title(), " ".join(name_parts[1:]).title()
 
 
-def extract_in_now_location(text: str) -> str | None:
+def extract_in_now_location(text: str) -> Optional[str]:
     """Extract location from "I'm in <place> now" pattern."""
     m = IN_NOW_RE.match(text or "")
     if not m:
@@ -271,7 +272,7 @@ def is_alarm_cmd(text: str) -> bool:
     return False
 
 
-def extract_alarm_title(text: str) -> str | None:
+def extract_alarm_title(text: str) -> Optional[str]:
     """Extract alarm/reminder title from text like 'set an alarm to wake up' or 'remind me to call mom'."""
     t = normalize_text(text).lower()
     
@@ -301,7 +302,7 @@ def extract_alarm_title(text: str) -> str | None:
     return None
 
 
-def extract_time_from_text(text: str) -> str | None:
+def extract_time_from_text(text: str) -> Optional[str]:
     """Extract time string from text like 'remind me at 2pm' or 'at 14:00'."""
     import re
     t = normalize_text(text).lower()
@@ -323,7 +324,7 @@ def extract_time_from_text(text: str) -> str | None:
     return None
 
 
-def extract_weather_for_location(text: str) -> str | None:
+def extract_weather_for_location(text: str) -> Optional[str]:
     """Extract location from "send me the weather for <location>" pattern."""
     # Patterns: "weather for Portland, OR", "weather for Portland OR", etc.
     patterns = [
@@ -428,7 +429,7 @@ def set_location(handle_id: str, loc: str) -> tuple[float, float, str]:
     return lat, lon, pretty
 
 
-def get_last_contact_info(handle_id: str) -> tuple[int, str] | None:
+def get_last_contact_info(handle_id: str) -> Optional[tuple[int, str]]:
     """Get last contact time info. Returns (seconds, formatted_string) or None.
     Format: "[ Last contact: HH:MM PST  X mins ago / {epoch_time} ]"
     """
