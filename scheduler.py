@@ -228,7 +228,9 @@ def calculate_next_run(schedule_time: time, schedule_type: str, tz_str: Optional
     else:
         # Use local timezone
         local_now = now.astimezone()
-        scheduled_dt = datetime.combine(local_now.date(), schedule_time)
+        scheduled_dt_naive = datetime.combine(local_now.date(), schedule_time)
+        # Make it timezone-aware by using replace (works for both timezone and pytz)
+        scheduled_dt = scheduled_dt_naive.replace(tzinfo=local_now.tzinfo)
         
         # If the time has already passed today, schedule for tomorrow
         if scheduled_dt <= local_now:
