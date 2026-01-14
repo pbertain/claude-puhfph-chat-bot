@@ -12,8 +12,12 @@ PROFILE_DB = pathlib.Path.home() / ".imessage_autoreply_profiles.sqlite3"
 # Polling settings
 POLL_SECONDS = 5
 
-# Troubleshooting web UI auth (set to a non-empty token to enable auth)
+# Troubleshooting web UI auth
+# Set TROUBLESHOOTING_TOKEN to enable token auth
+# Set TROUBLESHOOTING_USER/TROUBLESHOOTING_PASS to enable basic auth
 TROUBLESHOOTING_TOKEN = ""
+TROUBLESHOOTING_USER = ""
+TROUBLESHOOTING_PASS = ""
 
 # NWS API settings
 NWS_USER_AGENT = "imessage-autoreply-bot/1.3 (claudep; contact: you@example.com)"

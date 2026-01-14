@@ -26,28 +26,52 @@ def _auth_token() -> str:
     return os.environ.get("TROUBLESHOOTING_TOKEN") or config.TROUBLESHOOTING_TOKEN
 
 
+def _auth_basic_user() -> str:
+    """Return the troubleshooting basic auth username if set."""
+    return os.environ.get("TROUBLESHOOTING_USER") or config.TROUBLESHOOTING_USER
+
+
+def _auth_basic_pass() -> str:
+    """Return the troubleshooting basic auth password if set."""
+    return os.environ.get("TROUBLESHOOTING_PASS") or config.TROUBLESHOOTING_PASS
+
+
 def _require_auth() -> bool:
-    """Require auth if a token is configured."""
-    return bool(_auth_token())
+    """Require auth if a token or basic auth is configured."""
+    return bool(_auth_token() or _auth_basic_user() or _auth_basic_pass())
 
 
 def _is_authorized(req: request) -> bool:
-    """Check for a matching token via header or query param."""
+    """Check for a matching token via header/query or basic auth."""
     token = _auth_token()
-    if not token:
-        return True
-    header_token = req.headers.get("X-Auth-Token")
-    query_token = req.args.get("token")
-    return header_token == token or query_token == token
+    user = _auth_basic_user()
+    passwd = _auth_basic_pass()
+
+    # Token auth
+    if token:
+        header_token = req.headers.get("X-Auth-Token")
+        query_token = req.args.get("token")
+        if header_token == token or query_token == token:
+            return True
+
+    # Basic auth
+    if user or passwd:
+        auth = req.authorization
+        if auth and auth.username == user and auth.password == passwd:
+            return True
+
+    return False
 
 
 def _auth_response() -> Response:
     """Return a 401 response with guidance for auth."""
-    return Response(
-        "Unauthorized. Provide X-Auth-Token header or ?token=... query param.",
+    resp = Response(
+        "Unauthorized. Provide Basic auth or X-Auth-Token / ?token=... .",
         status=401,
         mimetype="text/plain",
     )
+    resp.headers["WWW-Authenticate"] = 'Basic realm="Troubleshooting"'
+    return resp
 
 
 def check_bot_running() -> bool:

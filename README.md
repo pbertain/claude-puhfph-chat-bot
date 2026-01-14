@@ -141,15 +141,41 @@ http://localhost:55042
 
 **Authentication:**
 
-The troubleshooting UI can be protected by a token. Set one of the following:
+The troubleshooting UI can be protected by **Basic auth (username/password)** or a token.
 
-1. **In `config.py`** (applies to both manual and launchctl runs):
+**Option A — Basic Auth (username/password):**
+
+1. **In `config.py`:**
+```python
+TROUBLESHOOTING_USER = "your-username"
+TROUBLESHOOTING_PASS = "your-strong-password"
+```
+
+2. **Or via environment variables** (recommended for launchctl):
+```
+<key>TROUBLESHOOTING_USER</key>
+<string>your-username</string>
+<key>TROUBLESHOOTING_PASS</key>
+<string>your-strong-password</string>
+```
+
+When enabled, your browser will prompt for a username/password.
+
+**CLI helper (launchctl):**
+
+You can set Basic Auth credentials and reload the launchctl service with:
+```bash
+./set_web_auth.sh your-username your-strong-password
+```
+
+**Option B — Token Auth:**
+
+1. **In `config.py`:**
 ```python
 TROUBLESHOOTING_TOKEN = "your-strong-token"
 ```
 
-2. **Or via environment variable** (recommended for launchctl):
-Add `TROUBLESHOOTING_TOKEN` to the `EnvironmentVariables` section in your launchctl plist:
+2. **Or via environment variable**:
 ```
 <key>TROUBLESHOOTING_TOKEN</key>
 <string>your-strong-token</string>
