@@ -113,6 +113,8 @@ def fetch_metars(stations: Iterable[str]) -> list[str]:
 
     url = f"https://www.fli-rite.net/metars/{','.join(station_list)}"
     resp = requests.get(url, timeout=(10, 20))
+    if resp.status_code == 404:
+        return ["AirPuff Weather:  Station not found.  😭🌡️☁️☀️⛈️❄️⚡️🌈"]
     resp.raise_for_status()
 
     try:
