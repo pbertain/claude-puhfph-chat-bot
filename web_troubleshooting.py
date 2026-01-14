@@ -199,6 +199,37 @@ def get_scheduled_messages_info() -> list[dict]:
 
 
 def get_alarms_info() -> list[dict]:
+    """Get information about alarms."""
+    def _do():
+        con = database.db_connect()
+        rows = con.execute(
+            """
+            SELECT alarm_id, handle_id, alarm_title, alert_time, schedule_type, next_run_at
+            FROM alarms
+            ORDER BY next_run_at ASC
+            LIMIT 20
+            """
+        ).fetchall()
+        con.close()
+
+        return [
+            {
+                "alarm_id": row[0],
+                "handle_id": row[1],
+                "alarm_title": row[2],
+                "alert_time": row[3],
+                "schedule_type": row[4],
+                "next_run_at": row[5],
+            }
+            for row in rows
+        ]
+
+    try:
+        return database.db_exec(_do)
+    except Exception as e:
+        return [{"error": str(e)}]
+
+
 def check_messages_db_access() -> dict:
     """Attempt to open the Messages DB to verify permissions."""
     if not config.CHAT_DB.exists():
@@ -218,36 +249,6 @@ def check_messages_db_access() -> dict:
             "accessible": False,
             "reason": str(e),
         }
-
-    """Get information about alarms."""
-    def _do():
-        con = database.db_connect()
-        rows = con.execute(
-            """
-            SELECT alarm_id, handle_id, alarm_title, alert_time, schedule_type, next_run_at
-            FROM alarms
-            ORDER BY next_run_at ASC
-            LIMIT 20
-            """
-        ).fetchall()
-        con.close()
-        
-        return [
-            {
-                "alarm_id": row[0],
-                "handle_id": row[1],
-                "alarm_title": row[2],
-                "alert_time": row[3],
-                "schedule_type": row[4],
-                "next_run_at": row[5],
-            }
-            for row in rows
-        ]
-    
-    try:
-        return database.db_exec(_do)
-    except Exception as e:
-        return [{"error": str(e)}]
 
 
 @app.route("/")
