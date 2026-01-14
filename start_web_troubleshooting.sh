@@ -16,7 +16,9 @@ if [ -f "$SHARED_VENV" ]; then
 elif [ -f "$LOCAL_VENV" ]; then
     VENV_PATH="$LOCAL_VENV"
 else
-    echo "Error: Virtual environment not found at $SHARED_VENV or $LOCAL_VENV" >&2
+    echo "Error: Virtual environment not found!" >&2
+    echo "  Checked: $SHARED_VENV" >&2
+    echo "  Checked: $LOCAL_VENV" >&2
     echo "Please create a virtual environment or update the VENV_PATH in this script." >&2
     exit 1
 fi
