@@ -122,7 +122,7 @@ def fetch_metars(stations: Iterable[str]) -> list[str]:
         data = resp.text
 
     entries = _normalize_metar_data(data)
-    results: list[str] = []
+    results_by_station: dict[str, str] = {}
 
     for entry in entries:
         station_id = str(entry.get("station_id", "")).upper() or "UNK"
@@ -144,9 +144,20 @@ def fetch_metars(stations: Iterable[str]) -> list[str]:
 
         cover, base = _format_ceiling(entry)
 
-        results.append(
+        results_by_station[station_id] = (
             f"{station_id}-{flight_category}-{altim_str}-{temp_str}/{dew_str}-"
             f"{wind_str}-{vis_str}mi-{cover}|{base}ft"
         )
 
-    return results
+    # Preserve request order, then append any extras not requested.
+    ordered_results: list[str] = []
+    requested_upper = [s.upper() for s in station_list]
+    for station in requested_upper:
+        if station in results_by_station:
+            ordered_results.append(results_by_station[station])
+
+    for station, line in results_by_station.items():
+        if station not in requested_upper:
+            ordered_results.append(line)
+
+    return ordered_results
