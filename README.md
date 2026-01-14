@@ -57,8 +57,59 @@ python3 imessage-listener.py
 
 3. The bot will:
    - Initialize the database on first run
-   - Poll for incoming iMessages every 3 seconds
+   - Poll for incoming iMessages every 5 seconds
    - Respond to commands and scheduled messages
+
+### Running with Startup Script
+
+You can use the provided startup script to automatically activate the virtual environment and run the bot:
+
+```bash
+./start_bot.sh
+```
+
+This script will:
+- Automatically activate the virtual environment in the project directory
+- Run the bot with proper error handling
+- Use the correct working directory
+
+**Note:** If you want to use a different virtual environment path (e.g., `/Users/claudep/tools/venv/bin/activate`), edit `start_bot.sh` and change the `VENV_PATH` variable.
+
+### Running as a Launch Agent (Automatic Startup)
+
+To have the bot start automatically on login and keep running in the background:
+
+1. Install the launchctl service:
+```bash
+./install_launchctl.sh
+```
+
+2. The bot will now:
+   - Start automatically when you log in
+   - Restart automatically if it crashes
+   - Log output to `bot.log` and errors to `bot_error.log`
+
+3. To check if it's running:
+```bash
+launchctl list | grep claudepuhfph
+```
+
+4. To stop the service:
+```bash
+launchctl unload ~/Library/LaunchAgents/com.claudepuhfph.chatbot.plist
+```
+
+5. To start it again:
+```bash
+launchctl load ~/Library/LaunchAgents/com.claudepuhfph.chatbot.plist
+```
+
+6. To uninstall the service:
+```bash
+./uninstall_launchctl.sh
+```
+
+**Important:** Make sure Terminal (or your Python interpreter) has Full Disk Access permissions in System Settings > Privacy & Security, otherwise the bot won't be able to access the Messages database.
 
 ### Commands
 
@@ -90,6 +141,10 @@ After setup, users can request weather or schedule messages.
 - `weather.py` - Weather forecast API
 - `conversation.py` - Conversation state machine
 - `scheduler.py` - Scheduled message functionality
+- `start_bot.sh` - Startup script that activates venv and runs the bot
+- `install_launchctl.sh` - Script to install launchctl service
+- `uninstall_launchctl.sh` - Script to uninstall launchctl service
+- `com.claudepuhfph.chatbot.plist` - Launchctl plist configuration
 
 ## License
 
