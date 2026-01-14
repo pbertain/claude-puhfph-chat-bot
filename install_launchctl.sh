@@ -10,6 +10,9 @@ PLIST_DEST="$HOME/Library/LaunchAgents/$PLIST_NAME"
 
 echo "Installing launchctl service..."
 
+# Create LaunchAgents directory if it doesn't exist
+mkdir -p "$HOME/Library/LaunchAgents"
+
 # Update the plist file with the correct user path
 # Replace the hardcoded path with the actual script directory
 sed "s|/Users/paulb/Documents/version-control/git/claude-puhfph-chat-bot|$SCRIPT_DIR|g" "$PLIST_SOURCE" > "$PLIST_DEST"
