@@ -11,14 +11,25 @@ cd "$SCRIPT_DIR" || exit 1
 SHARED_VENV="/Users/claudep/tools/venv/bin/activate"
 LOCAL_VENV="$SCRIPT_DIR/venv/bin/activate"
 
-if [ -f "$SHARED_VENV" ]; then
+# Check if shared venv exists and is readable
+if [ -r "$SHARED_VENV" ]; then
     VENV_PATH="$SHARED_VENV"
 elif [ -f "$LOCAL_VENV" ]; then
     VENV_PATH="$LOCAL_VENV"
 else
     echo "Error: Virtual environment not found!" >&2
     echo "  Checked: $SHARED_VENV" >&2
+    if [ ! -e "$SHARED_VENV" ]; then
+        echo "    (File does not exist)" >&2
+    elif [ ! -r "$SHARED_VENV" ]; then
+        echo "    (File exists but is not readable)" >&2
+    fi
     echo "  Checked: $LOCAL_VENV" >&2
+    if [ ! -e "$LOCAL_VENV" ]; then
+        echo "    (File does not exist)" >&2
+    elif [ ! -r "$LOCAL_VENV" ]; then
+        echo "    (File exists but is not readable)" >&2
+    fi
     echo "Please create a virtual environment or update the VENV_PATH in this script." >&2
     exit 1
 fi
