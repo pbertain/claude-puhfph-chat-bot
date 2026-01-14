@@ -4,9 +4,10 @@ Fetch and format METAR (aviation) weather reports.
 """
 from __future__ import annotations
 
-from typing import Iterable, List
+from typing import Iterable, List, Any
 
 import requests
+import json
 
 
 def _c_to_f(temp_c: float | None) -> int | None:
@@ -79,6 +80,29 @@ def _format_ceiling(entry: dict) -> tuple[str, int]:
     return _normalize_cover(cover_out), base_out
 
 
+def _normalize_metar_data(data: Any) -> list[dict]:
+    """Normalize API response into a list of dict entries."""
+    if isinstance(data, list):
+        # Expect list of dicts
+        return [d for d in data if isinstance(d, dict)]
+    if isinstance(data, dict):
+        # Single entry or wrapped list
+        if "raw_text" in data and "station_id" in data:
+            return [data]
+        for key in ("data", "results", "metars"):
+            value = data.get(key)
+            if isinstance(value, list):
+                return [d for d in value if isinstance(d, dict)]
+        return []
+    if isinstance(data, str):
+        try:
+            parsed = json.loads(data)
+            return _normalize_metar_data(parsed)
+        except Exception:
+            return []
+    return []
+
+
 def fetch_metars(stations: Iterable[str]) -> list[str]:
     """
     Fetch METARs for station IDs and return formatted strings.
@@ -91,10 +115,16 @@ def fetch_metars(stations: Iterable[str]) -> list[str]:
     resp = requests.get(url, timeout=(10, 20))
     resp.raise_for_status()
 
-    data = resp.json()
+    try:
+        data = resp.json()
+    except ValueError:
+        # Fallback: try to parse as JSON string
+        data = resp.text
+
+    entries = _normalize_metar_data(data)
     results: list[str] = []
 
-    for entry in data:
+    for entry in entries:
         station_id = str(entry.get("station_id", "")).upper() or "UNK"
         flight_category = entry.get("flight_category") or "UNK"
         altim = entry.get("altim_in_hg")
