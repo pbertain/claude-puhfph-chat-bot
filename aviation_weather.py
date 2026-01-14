@@ -115,7 +115,7 @@ def fetch_metars(stations: Iterable[str]) -> list[str]:
     resp = requests.get(url, timeout=(10, 20))
     if resp.status_code == 404:
         # Treat as no stations found; return per-station not found lines in order.
-        return [f"{s.upper()}: Station not found.  😭🌡️☁️☀️⛈️❄️⚡️🌈 " for s in station_list]
+        return [f"{s.upper()}: not found.  😭🌡️☁️☀️⛈️❄️⚡️🌈 " for s in station_list]
     resp.raise_for_status()
 
     try:
@@ -159,7 +159,7 @@ def fetch_metars(stations: Iterable[str]) -> list[str]:
         if station in results_by_station:
             ordered_results.append(results_by_station[station])
         else:
-            ordered_results.append(f"{station}: Station not found.  😭🌡️☁️☀️⛈️❄️⚡️🌈 ")
+            ordered_results.append(f"{station}: not found.  😭🌡️☁️☀️⛈️❄️⚡️🌈 ")
 
     for station, line in results_by_station.items():
         if station not in requested_upper:
