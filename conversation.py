@@ -632,7 +632,7 @@ def handle_incoming(msg: message_polling.Incoming) -> None:
         if not lines:
             applescript_helpers.send_imessage(msg.handle_id, "No METAR data returned.")
             return
-        reply = "Aviation WX:\n" + "\n".join(lines)
+        reply = "AirPuff Weather:\n" + "\n".join(lines)
         applescript_helpers.send_imessage(msg.handle_id, reply)
         return
     
