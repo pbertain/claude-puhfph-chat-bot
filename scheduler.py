@@ -14,6 +14,11 @@ import database
 SCHEDULE_DAILY = "daily"
 SCHEDULE_ONCE = "once"
 
+# METAR/aviation keywords for scheduling
+METAR_KEYWORDS = {
+    "metar", "aviation", "airport wx", "airport weather", "avnwx", "avn wx", "airport",
+}
+
 
 # Timezone abbreviations mapping
 TZ_MAP = {
@@ -203,6 +208,60 @@ def parse_schedule_command(text: str) -> Optional[dict]:
     return None
 
 
+def parse_metar_schedule_command(text: str) -> Optional[dict]:
+    """
+    Parse a METAR scheduling command like:
+    - "schedule metar at 7am daily"
+    - "send aviation weather at 7:30pm"
+    - "metar kdwa at 7am"
+    - "aviation weather in 5 mins"
+    """
+    text_orig = text
+    text = text.strip().lower()
+    if not any(kw in text for kw in METAR_KEYWORDS):
+        return None
+
+    # Relative time: "in 5 mins"
+    relative_match = re.search(r'in\s+(\d+\s+(?:minute|min|mins|hour|hr|hrs|hours))', text)
+    if relative_match:
+        delta = parse_relative_time(f"in {relative_match.group(1)}")
+        if delta:
+            return {
+                "relative_delta": delta,
+                "schedule": SCHEDULE_ONCE,
+                "message_type": "metar",
+                "timezone": None,
+            }
+
+    # Absolute time: "... at 7am [daily]"
+    time_match = re.search(
+        r'\bat\s+([\d:]+(?:\s*(?:am|pm))?(?:\s+(?:pt|pst|pdt|mt|mst|mdt|ct|cst|cdt|et|est|edt))?)',
+        text,
+    )
+    if time_match:
+        time_str = time_match.group(1).strip()
+        parsed_time, tz = parse_time(time_str)
+        if not parsed_time:
+            return None
+
+        # Determine schedule type
+        if "everyday" in text or "daily" in text or "every day" in text:
+            schedule = SCHEDULE_DAILY
+        elif "once" in text:
+            schedule = SCHEDULE_ONCE
+        else:
+            schedule = SCHEDULE_DAILY
+
+        return {
+            "time": parsed_time,
+            "schedule": schedule,
+            "message_type": "metar",
+            "timezone": tz,
+        }
+
+    return None
+
+
 def calculate_next_run(schedule_time: time, schedule_type: str, tz_str: Optional[str] = None, now: Optional[datetime] = None) -> datetime:
     """
     Calculate the next run time for a scheduled message.
@@ -247,9 +306,9 @@ def calculate_next_run_relative(delta: timedelta, now: Optional[datetime] = None
     return now + delta
 
 
-def add_scheduled_message(handle_id: str, message_type: str, schedule_time: Optional[time] = None, 
+def add_scheduled_message(handle_id: str, message_type: str, schedule_time: Optional[time] = None,
                          schedule_type: str = SCHEDULE_ONCE, relative_delta: Optional[timedelta] = None,
-                         tz_str: Optional[str] = None) -> int:
+                         tz_str: Optional[str] = None, message_payload: Optional[str] = None) -> int:
     """
     Add a scheduled message to the database.
     Either schedule_time (for absolute times) or relative_delta (for relative times) must be provided.
@@ -269,12 +328,13 @@ def add_scheduled_message(handle_id: str, message_type: str, schedule_time: Opti
         cursor = con.execute(
             """
             INSERT INTO scheduled_messages 
-            (handle_id, message_type, schedule_time, schedule_type, next_run_at, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            (handle_id, message_type, message_payload, schedule_time, schedule_type, next_run_at, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 handle_id,
                 message_type,
+                message_payload,
                 schedule_time_str,
                 schedule_type,
                 next_run.isoformat(),
@@ -307,7 +367,7 @@ def get_due_scheduled_messages(now: Optional[datetime] = None) -> list[dict]:
         
         rows = con.execute(
             """
-            SELECT schedule_id, handle_id, message_type, schedule_time, schedule_type, next_run_at
+            SELECT schedule_id, handle_id, message_type, message_payload, schedule_time, schedule_type, next_run_at
             FROM scheduled_messages
             WHERE next_run_at <= ?
             ORDER BY next_run_at ASC
@@ -337,9 +397,10 @@ def get_due_scheduled_messages(now: Optional[datetime] = None) -> list[dict]:
                 "schedule_id": row[0],
                 "handle_id": row[1],
                 "message_type": row[2],
-                "schedule_time": row[3],
-                "schedule_type": row[4],
-                "next_run_at": row[5],
+                "message_payload": row[3],
+                "schedule_time": row[4],
+                "schedule_type": row[5],
+                "next_run_at": row[6],
             }
             for row in rows
         ]
@@ -404,7 +465,7 @@ def get_user_scheduled_messages(handle_id: str) -> list[dict]:
         con = database.db_connect()
         rows = con.execute(
             """
-            SELECT schedule_id, message_type, schedule_time, schedule_type, next_run_at
+            SELECT schedule_id, message_type, message_payload, schedule_time, schedule_type, next_run_at
             FROM scheduled_messages
             WHERE handle_id = ?
             ORDER BY next_run_at ASC
@@ -417,9 +478,10 @@ def get_user_scheduled_messages(handle_id: str) -> list[dict]:
             {
                 "schedule_id": row[0],
                 "message_type": row[1],
-                "schedule_time": row[2],
-                "schedule_type": row[3],
-                "next_run_at": row[4],
+                "message_payload": row[2],
+                "schedule_time": row[3],
+                "schedule_type": row[4],
+                "next_run_at": row[5],
             }
             for row in rows
         ]
@@ -433,7 +495,7 @@ def get_scheduled_messages_for_handle(handle_id: str) -> list[dict]:
         con = database.db_connect()
         rows = con.execute(
             """
-            SELECT schedule_id, message_type, schedule_time, schedule_type, next_run_at
+            SELECT schedule_id, message_type, message_payload, schedule_time, schedule_type, next_run_at
             FROM scheduled_messages
             WHERE handle_id = ?
             ORDER BY next_run_at ASC
@@ -446,9 +508,10 @@ def get_scheduled_messages_for_handle(handle_id: str) -> list[dict]:
             {
                 "schedule_id": row[0],
                 "message_type": row[1],
-                "schedule_time": row[2],
-                "schedule_type": row[3],
-                "next_run_at": row[4],
+                "message_payload": row[2],
+                "schedule_time": row[3],
+                "schedule_type": row[4],
+                "next_run_at": row[5],
             }
             for row in rows
         ]

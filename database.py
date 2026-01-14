@@ -98,7 +98,8 @@ def db_init() -> None:
             CREATE TABLE IF NOT EXISTS scheduled_messages (
               schedule_id INTEGER PRIMARY KEY AUTOINCREMENT,
               handle_id TEXT NOT NULL,
-              message_type TEXT NOT NULL,        -- 'weather', 'alarm', 'reminder'
+              message_type TEXT NOT NULL,        -- 'weather', 'alarm', 'reminder', 'metar'
+              message_payload TEXT,              -- optional payload (e.g., station ids)
               schedule_time TEXT,                -- HH:MM:SS format (NULL for relative time schedules)
               schedule_type TEXT NOT NULL,       -- 'daily' | 'once'
               next_run_at TEXT NOT NULL,         -- ISO format timestamp
@@ -178,6 +179,7 @@ def db_init() -> None:
                           schedule_id INTEGER PRIMARY KEY AUTOINCREMENT,
                           handle_id TEXT NOT NULL,
                           message_type TEXT NOT NULL,
+                          message_payload TEXT,
                           schedule_time TEXT,
                           schedule_type TEXT NOT NULL,
                           next_run_at TEXT NOT NULL,
@@ -188,7 +190,8 @@ def db_init() -> None:
                     """)
                     con.execute("""
                         INSERT INTO scheduled_messages_new 
-                        SELECT * FROM scheduled_messages
+                        SELECT schedule_id, handle_id, message_type, NULL, schedule_time, schedule_type, next_run_at, created_at, updated_at
+                        FROM scheduled_messages
                     """)
                     con.execute("DROP TABLE scheduled_messages")
                     con.execute("ALTER TABLE scheduled_messages_new RENAME TO scheduled_messages")
@@ -202,6 +205,16 @@ def db_init() -> None:
                     raise
         except sqlite3.OperationalError:
             # Table doesn't exist yet, that's fine
+            pass
+
+        # Add message_payload column if missing
+        try:
+            cursor = con.execute("PRAGMA table_info(scheduled_messages)")
+            columns = cursor.fetchall()
+            has_payload = any(col[1] == "message_payload" for col in columns)
+            if not has_payload:
+                con.execute("ALTER TABLE scheduled_messages ADD COLUMN message_payload TEXT")
+        except sqlite3.OperationalError:
             pass
         
         con.commit()

@@ -172,7 +172,7 @@ def get_scheduled_messages_info() -> list[dict]:
         con = database.db_connect()
         rows = con.execute(
             """
-            SELECT schedule_id, handle_id, message_type, schedule_time, schedule_type, next_run_at
+            SELECT schedule_id, handle_id, message_type, message_payload, schedule_time, schedule_type, next_run_at
             FROM scheduled_messages
             ORDER BY next_run_at ASC
             LIMIT 20
@@ -185,9 +185,10 @@ def get_scheduled_messages_info() -> list[dict]:
                 "schedule_id": row[0],
                 "handle_id": row[1],
                 "message_type": row[2],
-                "schedule_time": row[3],
-                "schedule_type": row[4],
-                "next_run_at": row[5],
+                "message_payload": row[3],
+                "schedule_time": row[4],
+                "schedule_type": row[5],
+                "next_run_at": row[6],
             }
             for row in rows
         ]

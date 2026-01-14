@@ -82,6 +82,7 @@ Aviation (METAR) weather:
 • "aviation kdwa" or "metar kdwa"
 • "airport wx kedu,kpao"
 • "avnwx kpao"
+• "schedule metar kedu,kpao at 7am daily"
 
 Feel free to ask naturally - I understand conversational language!
 """
@@ -860,7 +861,69 @@ def handle_incoming(msg: message_polling.Incoming) -> None:
         reply_weather(msg.handle_id, loc, float(lat), float(lon))
         return
 
-    # Check for scheduler commands
+    # Check for METAR scheduling commands
+    metar_schedule_info = scheduler.parse_metar_schedule_command(msg.text)
+    if metar_schedule_info:
+        station_ids = extract_station_ids(msg.text)
+        if not station_ids:
+            applescript_helpers.send_imessage(
+                msg.handle_id,
+                "Which station IDs should I use? Try: \"schedule metar kedu,kpao at 7am daily\".",
+            )
+            return
+        payload = ",".join(station_ids)
+        try:
+            if "relative_delta" in metar_schedule_info:
+                schedule_id = scheduler.add_scheduled_message(
+                    msg.handle_id,
+                    metar_schedule_info["message_type"],
+                    schedule_type=metar_schedule_info["schedule"],
+                    relative_delta=metar_schedule_info["relative_delta"],
+                    message_payload=payload,
+                )
+                delta = metar_schedule_info["relative_delta"]
+                minutes = int(delta.total_seconds() / 60)
+                hours = int(delta.total_seconds() / 3600)
+                if hours > 0:
+                    time_desc = f"{hours} hour{'s' if hours != 1 else ''}"
+                    if minutes % 60 > 0:
+                        time_desc += f" {minutes % 60} minute{'s' if minutes % 60 != 1 else ''}"
+                else:
+                    time_desc = f"{minutes} minute{'s' if minutes != 1 else ''}"
+                applescript_helpers.send_imessage(
+                    msg.handle_id,
+                    f"Got it! I'll send METARs for {payload} in {time_desc}.",
+                )
+                return
+            else:
+                schedule_id = scheduler.add_scheduled_message(
+                    msg.handle_id,
+                    metar_schedule_info["message_type"],
+                    schedule_time=metar_schedule_info["time"],
+                    schedule_type=metar_schedule_info["schedule"],
+                    tz_str=metar_schedule_info["timezone"],
+                    message_payload=payload,
+                )
+                time_str = metar_schedule_info["time"].strftime("%I:%M %p").lstrip("0")
+                schedule_desc = "daily" if metar_schedule_info["schedule"] == scheduler.SCHEDULE_DAILY else "once"
+                applescript_helpers.send_imessage(
+                    msg.handle_id,
+                    f"Scheduled METARs for {payload} at {time_str} ({schedule_desc}).",
+                )
+                return
+        except Exception as e:
+            applescript_helpers.send_imessage(msg.handle_id, f"Couldn't schedule METARs: {e}")
+            return
+
+    # If they ask about scheduling METARs without a time, guide them
+    if is_aviation_cmd(msg.text) and any(kw in normalize_text(msg.text).lower() for kw in SCHEDULE_KEYWORDS):
+        applescript_helpers.send_imessage(
+            msg.handle_id,
+            "Sure! Try: \"schedule metar kedu,kpao at 7am daily\" or \"metar kdwa in 5 mins\".",
+        )
+        return
+
+    # Check for scheduler commands (weather)
     schedule_info = scheduler.parse_schedule_command(msg.text)
     if schedule_info:
         p = database.get_person(msg.handle_id)
@@ -1026,6 +1089,21 @@ def execute_scheduled_weather(handle_id: str) -> None:
         # Skip if location not set
         return
     reply_weather(handle_id, loc, float(lat), float(lon))
+
+
+def execute_scheduled_metar(handle_id: str, payload: str) -> None:
+    """Execute a scheduled METAR message for a handle."""
+    station_ids = [s.strip().upper() for s in (payload or "").split(",") if s.strip()]
+    if not station_ids:
+        return
+    try:
+        lines = aviation_weather.fetch_metars(station_ids)
+    except Exception:
+        return
+    if not lines:
+        return
+    reply = "AirPuff Weather:\n" + "\n".join(lines)
+    applescript_helpers.send_imessage(handle_id, reply)
 
 
 def execute_alarm(alarm_data: dict) -> None:

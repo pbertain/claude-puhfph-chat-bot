@@ -26,6 +26,11 @@ def main() -> int:
                 try:
                     if schedule["message_type"] == "weather":
                         conversation.execute_scheduled_weather(schedule["handle_id"])
+                    elif schedule["message_type"] == "metar":
+                        conversation.execute_scheduled_metar(
+                            schedule["handle_id"],
+                            schedule.get("message_payload") or "",
+                        )
                     
                     # Update next run time (or delete if one-time)
                     scheduler.update_next_run(
