@@ -19,7 +19,7 @@ touch "$SCRIPT_DIR/web_troubleshooting_error.log"
 
 # Update the plist file with the correct user path
 # Replace the hardcoded path with the actual script directory
-sed "s|/Users/paulb/Documents/version-control/git/claude-puhfph-chat-bot|$SCRIPT_DIR|g" "$PLIST_SOURCE" > "$PLIST_DEST"
+sed "s|/Users/claudep/tools/claude-puhfph-chat-bot|$SCRIPT_DIR|g" "$PLIST_SOURCE" > "$PLIST_DEST"
 
 # Load the service
 launchctl load "$PLIST_DEST"

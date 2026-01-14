@@ -7,18 +7,18 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>/Users/paulb/Documents/version-control/git/claude-puhfph-chat-bot/start_web_troubleshooting.sh</string>
+        <string>/Users/claudep/tools/claude-puhfph-chat-bot/start_web_troubleshooting.sh</string>
     </array>
     <key>WorkingDirectory</key>
-    <string>/Users/paulb/Documents/version-control/git/claude-puhfph-chat-bot</string>
+    <string>/Users/claudep/tools/claude-puhfph-chat-bot</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>/Users/paulb/Documents/version-control/git/claude-puhfph-chat-bot/web_troubleshooting.log</string>
+    <string>/Users/claudep/tools/claude-puhfph-chat-bot/web_troubleshooting.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/paulb/Documents/version-control/git/claude-puhfph-chat-bot/web_troubleshooting_error.log</string>
+    <string>/Users/claudep/tools/claude-puhfph-chat-bot/web_troubleshooting_error.log</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
