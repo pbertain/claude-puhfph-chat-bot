@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.claudepuhfph.chatbot.web</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/paulb/Documents/version-control/git/claude-puhfph-chat-bot/start_web_troubleshooting.sh</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/paulb/Documents/version-control/git/claude-puhfph-chat-bot</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/paulb/Documents/version-control/git/claude-puhfph-chat-bot/web_troubleshooting.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/paulb/Documents/version-control/git/claude-puhfph-chat-bot/web_troubleshooting_error.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>

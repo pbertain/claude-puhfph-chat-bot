@@ -113,7 +113,17 @@ launchctl load ~/Library/LaunchAgents/com.claudepuhfph.chatbot.plist
 
 ### Web Troubleshooting Interface
 
-A web-based troubleshooting dashboard is available to monitor the bot's status and diagnose issues:
+A web-based troubleshooting dashboard is available to monitor the bot's status and diagnose issues.
+
+**Installation:**
+
+1. Install Flask (if not already installed):
+```bash
+source venv/bin/activate
+pip install -r requirements.txt
+```
+
+**Manual Usage:**
 
 1. Start the troubleshooting server:
 ```bash
@@ -125,6 +135,42 @@ python3 web_troubleshooting.py
 http://localhost:55042
 ```
 
+**Automatic Startup (Launchctl):**
+
+To have the web troubleshooting interface start automatically on login:
+
+1. Install the launchctl service:
+```bash
+./install_web_launchctl.sh
+```
+
+2. The web interface will now:
+   - Start automatically when you log in
+   - Restart automatically if it crashes
+   - Log output to `web_troubleshooting.log` and errors to `web_troubleshooting_error.log`
+
+3. To check if it's running:
+```bash
+launchctl list | grep claudepuhfph
+```
+
+4. To stop the service:
+```bash
+launchctl unload ~/Library/LaunchAgents/com.claudepuhfph.chatbot.web.plist
+```
+
+5. To start it again:
+```bash
+launchctl load ~/Library/LaunchAgents/com.claudepuhfph.chatbot.web.plist
+```
+
+6. To uninstall the service:
+```bash
+./uninstall_web_launchctl.sh
+```
+
+**Dashboard Features:**
+
 The dashboard shows:
 - Bot process status (running/stopped)
 - Launchctl service status
@@ -133,6 +179,8 @@ The dashboard shows:
 - Recent logs and errors
 - Last processed message row ID
 - Scheduled messages and alarms
+
+**API Endpoints:**
 
 The server also provides JSON API endpoints:
 - `GET /api/status` - Bot status information
@@ -174,6 +222,10 @@ After setup, users can request weather or schedule messages.
 - `uninstall_launchctl.sh` - Script to uninstall launchctl service
 - `com.claudepuhfph.chatbot.plist` - Launchctl plist configuration
 - `web_troubleshooting.py` - Web-based troubleshooting dashboard (runs on port 55042)
+- `start_web_troubleshooting.sh` - Startup script for web troubleshooting interface
+- `install_web_launchctl.sh` - Script to install web troubleshooting launchctl service
+- `uninstall_web_launchctl.sh` - Script to uninstall web troubleshooting launchctl service
+- `com.claudepuhfph.chatbot.web.plist` - Launchctl plist configuration for web interface
 
 ## License
 
