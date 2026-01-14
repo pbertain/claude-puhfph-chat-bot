@@ -107,7 +107,7 @@ NAME_CHANGE_PATTERNS = ["change my name", "update my name", "my name is wrong", 
                         "correct my name", "my name should be", "update name"]
 
 IN_NOW_RE = re.compile(
-    r"""^\s*(?:i'?m|i\s+am)\s+in\s+(?P<loc>.+?)(?:\s+now)?\s*$""",
+    r"""^\s*(?:i'?m|im|i\s+am)\s+in\s+(?P<loc>.+?)(?:\s+now)?\s*[.!?]?\s*$""",
     re.IGNORECASE,
 )
 
@@ -247,7 +247,12 @@ def extract_name_from_text(text: str) -> tuple[Optional[str], Optional[str]]:
 
 def extract_in_now_location(text: str) -> Optional[str]:
     """Extract location from "I'm in <place> now" pattern."""
-    m = IN_NOW_RE.match(text or "")
+    if not text:
+        return None
+    normalized = normalize_text(text)
+    # Normalize common smart apostrophes to ASCII for regex matching.
+    normalized = normalized.replace("\u2019", "'").replace("\u2018", "'")
+    m = IN_NOW_RE.match(normalized)
     if not m:
         return None
     loc = normalize_text(m.group("loc"))
@@ -926,9 +931,6 @@ def handle_incoming(msg: message_polling.Incoming) -> None:
     response = " ".join(response_parts)
     
     applescript_helpers.send_imessage(msg.handle_id, response)
-    
-    # Automatically send help info after unknown message
-    applescript_helpers.send_imessage(msg.handle_id, HELP_TEXT)
     return
 
 
