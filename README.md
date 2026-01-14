@@ -111,6 +111,34 @@ launchctl load ~/Library/LaunchAgents/com.claudepuhfph.chatbot.plist
 
 **Important:** Make sure Terminal (or your Python interpreter) has Full Disk Access permissions in System Settings > Privacy & Security, otherwise the bot won't be able to access the Messages database.
 
+### Web Troubleshooting Interface
+
+A web-based troubleshooting dashboard is available to monitor the bot's status and diagnose issues:
+
+1. Start the troubleshooting server:
+```bash
+python3 web_troubleshooting.py
+```
+
+2. Open your browser to:
+```
+http://localhost:55042
+```
+
+The dashboard shows:
+- Bot process status (running/stopped)
+- Launchctl service status
+- Database access status
+- Database statistics (users, scheduled messages, alarms)
+- Recent logs and errors
+- Last processed message row ID
+- Scheduled messages and alarms
+
+The server also provides JSON API endpoints:
+- `GET /api/status` - Bot status information
+- `GET /api/stats` - Database statistics
+- `GET /api/logs` - Recent log entries
+
 ### Commands
 
 Users can send these commands via iMessage:
@@ -145,6 +173,7 @@ After setup, users can request weather or schedule messages.
 - `install_launchctl.sh` - Script to install launchctl service
 - `uninstall_launchctl.sh` - Script to uninstall launchctl service
 - `com.claudepuhfph.chatbot.plist` - Launchctl plist configuration
+- `web_troubleshooting.py` - Web-based troubleshooting dashboard (runs on port 55042)
 
 ## License
 
