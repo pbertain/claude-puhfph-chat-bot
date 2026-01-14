@@ -124,6 +124,18 @@ def is_help(text: str) -> bool:
     return t in help_keywords or any(kw in t for kw in ["help", "what can", "what do you"])
 
 
+def is_yes(text: str) -> bool:
+    """Check if text is a yes/affirmative response."""
+    t = normalize_text(text).lower()
+    return t in {"yes", "y", "sure", "ok", "okay", "yeah", "yep", "please"}
+
+
+def is_no(text: str) -> bool:
+    """Check if text is a no/negative response."""
+    t = normalize_text(text).lower()
+    return t in {"no", "n", "nope", "nah"}
+
+
 def is_weather_cmd(text: str) -> bool:
     """Check if text is asking about weather using natural language."""
     t = normalize_text(text).lower()
@@ -555,6 +567,23 @@ def handle_incoming(msg: message_polling.Incoming) -> None:
     if not msg.text:
         return
 
+    # Check if user is responding to "Do you want help?" prompt
+    temp_data = database.get_temp_data(msg.handle_id)
+    if temp_data.get("awaiting_help_confirm"):
+        if is_yes(msg.text):
+            temp_data["awaiting_help_confirm"] = False
+            database.set_temp_data(msg.handle_id, temp_data)
+            applescript_helpers.send_imessage(msg.handle_id, HELP_TEXT)
+            return
+        if is_no(msg.text):
+            temp_data["awaiting_help_confirm"] = False
+            database.set_temp_data(msg.handle_id, temp_data)
+            applescript_helpers.send_imessage(msg.handle_id, "Okay — let me know if you need anything.")
+            return
+        # Not a yes/no; clear the flag and continue normal handling
+        temp_data["awaiting_help_confirm"] = False
+        database.set_temp_data(msg.handle_id, temp_data)
+
     if is_help(msg.text):
         applescript_helpers.send_imessage(msg.handle_id, HELP_TEXT)
         return
@@ -931,6 +960,11 @@ def handle_incoming(msg: message_polling.Incoming) -> None:
     response = " ".join(response_parts)
     
     applescript_helpers.send_imessage(msg.handle_id, response)
+    
+    # Remember that we asked about help, so a "yes" can trigger it
+    temp_data = database.get_temp_data(msg.handle_id)
+    temp_data["awaiting_help_confirm"] = True
+    database.set_temp_data(msg.handle_id, temp_data)
     return
 
 
