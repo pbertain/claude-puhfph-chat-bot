@@ -14,8 +14,10 @@ LOCAL_VENV="$SCRIPT_DIR/venv/bin/activate"
 # Check if shared venv exists and is readable
 if [ -r "$SHARED_VENV" ]; then
     VENV_PATH="$SHARED_VENV"
+    echo "Using shared venv: $VENV_PATH" >&2
 elif [ -f "$LOCAL_VENV" ]; then
     VENV_PATH="$LOCAL_VENV"
+    echo "Using local venv: $VENV_PATH" >&2
 else
     echo "Error: Virtual environment not found!" >&2
     echo "  Checked: $SHARED_VENV" >&2
