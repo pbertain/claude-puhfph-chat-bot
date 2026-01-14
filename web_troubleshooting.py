@@ -549,9 +549,25 @@ HTML_TEMPLATE = """
 
 def main():
     """Run the web troubleshooting server."""
-    print(f"Starting troubleshooting web interface on http://localhost:55042")
+    import socket
+    
+    # Get LAN IP address
+    lan_ip = "localhost"
+    try:
+        # Connect to a remote address to determine the local IP
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        lan_ip = s.getsockname()[0]
+        s.close()
+    except Exception:
+        pass
+    
+    print(f"Starting troubleshooting web interface:")
+    print(f"  Local: http://localhost:55042")
+    print(f"  LAN:   http://{lan_ip}:55042")
     print("Press Ctrl-C to stop")
-    app.run(host="127.0.0.1", port=55042, debug=False)
+    # Listen on all interfaces (0.0.0.0) to allow LAN access via en0
+    app.run(host="0.0.0.0", port=55042, debug=False)
 
 
 if __name__ == "__main__":

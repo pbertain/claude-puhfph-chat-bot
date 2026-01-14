@@ -135,6 +135,8 @@ python3 web_troubleshooting.py
 http://localhost:55042
 ```
 
+   The interface is also accessible from other devices on your local network via your LAN IP address (e.g., `http://192.168.1.x:55042`). The startup message will show both URLs.
+
 **Automatic Startup (Launchctl):**
 
 To have the web troubleshooting interface start automatically on login:
