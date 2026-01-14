@@ -13,6 +13,7 @@ import geocode
 import message_polling
 import scheduler
 import weather
+import aviation_weather
 from datetime import time as dt_time
 
 # ------------ greeting ------------
@@ -77,6 +78,11 @@ Other questions:
 • "When did we last talk?" or "Last contact"
 • "Set an alarm to wake up" or "Remind me to call mom"
 
+Aviation (METAR) weather:
+• "aviation kdwa" or "metar kdwa"
+• "airport wx kedu,kpao"
+• "avnwx kpao"
+
 Feel free to ask naturally - I understand conversational language!
 """
 
@@ -85,6 +91,10 @@ WEATHER_KEYWORDS = {"weather", "forecast", "temperature", "temp", "wx", "rain", 
 WEATHER_QUESTIONS = {"what's the weather", "how's the weather", "what is the weather", "tell me the weather", 
                      "give me the weather", "show me the weather", "weather forecast", "weather report",
                      "how is it outside", "what's it like outside", "how's it outside", "what's the weather like"}
+
+AVIATION_KEYWORDS = {
+    "aviation", "metar", "airport", "airport wx", "airport weather", "avn", "avnwx", "avn wx"
+}
 
 LAST_CONTACT_KEYWORDS = {"last", "contact", "talk", "spoke", "messaged", "texted", "when did", "how long"}
 LAST_CONTACT_QUESTIONS = {"when did we last talk", "when did we last contact", "when did we last speak",
@@ -134,6 +144,24 @@ def is_no(text: str) -> bool:
     """Check if text is a no/negative response."""
     t = normalize_text(text).lower()
     return t in {"no", "n", "nope", "nah"}
+
+
+def is_aviation_cmd(text: str) -> bool:
+    """Check if text is requesting METAR/aviation weather."""
+    t = normalize_text(text).lower()
+    if any(kw in t for kw in AVIATION_KEYWORDS):
+        return True
+    # If the message is just a list of station IDs, treat as aviation request
+    if re.fullmatch(r"[a-zA-Z,\s]+", t or "") and re.search(r"\b[a-zA-Z]{4}\b", t):
+        return True
+    return False
+
+
+def extract_station_ids(text: str) -> list[str]:
+    """Extract station IDs (4-letter) from text."""
+    t = normalize_text(text).lower()
+    matches = re.findall(r"\b[a-z]{4}\b", t)
+    return [m.upper() for m in matches]
 
 
 def is_weather_cmd(text: str) -> bool:
@@ -586,6 +614,26 @@ def handle_incoming(msg: message_polling.Incoming) -> None:
 
     if is_help(msg.text):
         applescript_helpers.send_imessage(msg.handle_id, HELP_TEXT)
+        return
+
+    if is_aviation_cmd(msg.text):
+        station_ids = extract_station_ids(msg.text)
+        if not station_ids:
+            applescript_helpers.send_imessage(
+                msg.handle_id,
+                "I couldn't find any 4-letter station IDs. Try: \"metar kdwa\" or \"airport wx kedu,kpao\".",
+            )
+            return
+        try:
+            lines = aviation_weather.fetch_metars(station_ids)
+        except Exception as e:
+            applescript_helpers.send_imessage(msg.handle_id, f"Aviation weather lookup failed: {e}")
+            return
+        if not lines:
+            applescript_helpers.send_imessage(msg.handle_id, "No METAR data returned.")
+            return
+        reply = "Aviation WX:\n" + "\n".join(lines)
+        applescript_helpers.send_imessage(msg.handle_id, reply)
         return
     
     # Check for name change request (works in any state)
