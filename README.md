@@ -111,6 +111,8 @@ launchctl load ~/Library/LaunchAgents/com.claudepuhfph.chatbot.plist
 
 **Important:** Make sure Terminal (or your Python interpreter) has Full Disk Access permissions in System Settings > Privacy & Security, otherwise the bot won't be able to access the Messages database.
 
+If you're running via launchctl, grant Full Disk Access to the exact Python executable that runs the bot (e.g., the venv python at `/Users/claudep/tools/venv/bin/python3`). The troubleshooting UI will show the active Python path.
+
 ### Web Troubleshooting Interface
 
 A web-based troubleshooting dashboard is available to monitor the bot's status and diagnose issues.
@@ -136,6 +138,26 @@ http://localhost:55042
 ```
 
    The interface is also accessible from other devices on your local network via your LAN IP address (e.g., `http://192.168.1.x:55042`). The startup message will show both URLs.
+
+**Authentication:**
+
+The troubleshooting UI can be protected by a token. Set one of the following:
+
+1. **In `config.py`** (applies to both manual and launchctl runs):
+```python
+TROUBLESHOOTING_TOKEN = "your-strong-token"
+```
+
+2. **Or via environment variable** (recommended for launchctl):
+Add `TROUBLESHOOTING_TOKEN` to the `EnvironmentVariables` section in your launchctl plist:
+```
+<key>TROUBLESHOOTING_TOKEN</key>
+<string>your-strong-token</string>
+```
+
+When enabled, requests must include either:
+- Header: `X-Auth-Token: your-strong-token`
+- Query param: `?token=your-strong-token`
 
 **Automatic Startup (Launchctl):**
 

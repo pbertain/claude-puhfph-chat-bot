@@ -6,10 +6,12 @@ Runs on port 55042 and provides status, logs, and diagnostics.
 import json
 import os
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from flask import Flask, render_template_string, jsonify
+from flask import Flask, render_template_string, jsonify, request, Response
+import sqlite3
 
 import config
 import database
@@ -17,6 +19,35 @@ import message_polling
 import scheduler
 
 app = Flask(__name__)
+
+
+def _auth_token() -> str:
+    """Return the troubleshooting auth token if set."""
+    return os.environ.get("TROUBLESHOOTING_TOKEN") or config.TROUBLESHOOTING_TOKEN
+
+
+def _require_auth() -> bool:
+    """Require auth if a token is configured."""
+    return bool(_auth_token())
+
+
+def _is_authorized(req: request) -> bool:
+    """Check for a matching token via header or query param."""
+    token = _auth_token()
+    if not token:
+        return True
+    header_token = req.headers.get("X-Auth-Token")
+    query_token = req.args.get("token")
+    return header_token == token or query_token == token
+
+
+def _auth_response() -> Response:
+    """Return a 401 response with guidance for auth."""
+    return Response(
+        "Unauthorized. Provide X-Auth-Token header or ?token=... query param.",
+        status=401,
+        mimetype="text/plain",
+    )
 
 
 def check_bot_running() -> bool:
@@ -144,6 +175,26 @@ def get_scheduled_messages_info() -> list[dict]:
 
 
 def get_alarms_info() -> list[dict]:
+def check_messages_db_access() -> dict:
+    """Attempt to open the Messages DB to verify permissions."""
+    if not config.CHAT_DB.exists():
+        return {
+            "accessible": False,
+            "reason": "File does not exist",
+        }
+
+    uri = f"file:{config.CHAT_DB}?mode=ro"
+    try:
+        con = sqlite3.connect(uri, uri=True)
+        con.execute("SELECT 1")
+        con.close()
+        return {"accessible": True, "reason": None}
+    except Exception as e:
+        return {
+            "accessible": False,
+            "reason": str(e),
+        }
+
     """Get information about alarms."""
     def _do():
         con = database.db_connect()
@@ -178,6 +229,9 @@ def get_alarms_info() -> list[dict]:
 @app.route("/")
 def index():
     """Main troubleshooting dashboard."""
+    if _require_auth() and not _is_authorized(request):
+        return _auth_response()
+
     bot_running = check_bot_running()
     launchctl_running = check_launchctl_running()
     last_rowid = message_polling.read_last_rowid()
@@ -194,8 +248,9 @@ def index():
     scheduled_messages = get_scheduled_messages_info()
     alarms = get_alarms_info()
     
-    # Check if Messages DB is accessible
-    messages_db_accessible = config.CHAT_DB.exists()
+    # Check if Messages DB is accessible (permissions)
+    messages_db_access = check_messages_db_access()
+    messages_db_accessible = messages_db_access["accessible"]
     profile_db_accessible = config.PROFILE_DB.exists()
     
     return render_template_string(HTML_TEMPLATE, **{
@@ -208,36 +263,50 @@ def index():
         "scheduled_messages": scheduled_messages,
         "alarms": alarms,
         "messages_db_accessible": messages_db_accessible,
+        "messages_db_access_reason": messages_db_access.get("reason"),
         "profile_db_accessible": profile_db_accessible,
         "messages_db_path": str(config.CHAT_DB),
         "profile_db_path": str(config.PROFILE_DB),
         "poll_seconds": config.POLL_SECONDS,
         "state_file": str(config.STATE_FILE),
+        "python_executable": sys.executable,
+        "auth_enabled": _require_auth(),
     })
 
 
 @app.route("/api/status")
 def api_status():
     """JSON API endpoint for status."""
+    if _require_auth() and not _is_authorized(request):
+        return _auth_response()
+
+    messages_db_access = check_messages_db_access()
     return jsonify({
         "bot_running": check_bot_running(),
         "launchctl_running": check_launchctl_running(),
         "last_rowid": message_polling.read_last_rowid(),
-        "messages_db_accessible": config.CHAT_DB.exists(),
+        "messages_db_accessible": messages_db_access["accessible"],
+        "messages_db_access_reason": messages_db_access.get("reason"),
         "profile_db_accessible": config.PROFILE_DB.exists(),
         "poll_seconds": config.POLL_SECONDS,
+        "python_executable": sys.executable,
+        "auth_enabled": _require_auth(),
     })
 
 
 @app.route("/api/stats")
 def api_stats():
     """JSON API endpoint for database stats."""
+    if _require_auth() and not _is_authorized(request):
+        return _auth_response()
     return jsonify(get_database_stats())
 
 
 @app.route("/api/logs")
 def api_logs():
     """JSON API endpoint for recent logs."""
+    if _require_auth() and not _is_authorized(request):
+        return _auth_response()
     script_dir = Path(__file__).parent
     bot_log = script_dir / "bot.log"
     bot_error_log = script_dir / "bot_error.log"
@@ -380,9 +449,19 @@ HTML_TEMPLATE = """
                 <div class="status-item">
                     <span>Messages DB:</span>
                     <span class="status-badge {% if messages_db_accessible %}status-ok{% else %}status-error{% endif %}">
-                        {% if messages_db_accessible %}Accessible{% else %}Not Found{% endif %}
+                        {% if messages_db_accessible %}Accessible{% else %}Error{% endif %}
                     </span>
                 </div>
+                {% if not messages_db_accessible and messages_db_access_reason %}
+                <div class="status-item">
+                    <span>Messages DB Error:</span>
+                    <span class="timestamp">{{ messages_db_access_reason }}</span>
+                </div>
+                <div class="status-item">
+                    <span>Fix:</span>
+                    <span class="timestamp">Grant Full Disk Access to: {{ python_executable }}</span>
+                </div>
+                {% endif %}
                 <div class="status-item">
                     <span>Profile DB:</span>
                     <span class="status-badge {% if profile_db_accessible %}status-ok{% else %}status-error{% endif %}">
@@ -429,6 +508,20 @@ HTML_TEMPLATE = """
                 </div>
                 {% endif %}
                 {% endif %}
+            </div>
+        </div>
+
+        <div class="card" style="margin-bottom: 30px;">
+            <h2>Runtime Details</h2>
+            <div class="status-item">
+                <span>Python Executable:</span>
+                <span class="timestamp">{{ python_executable }}</span>
+            </div>
+            <div class="status-item">
+                <span>Auth Enabled:</span>
+                <span class="status-badge {% if auth_enabled %}status-ok{% else %}status-stopped{% endif %}">
+                    {% if auth_enabled %}Enabled{% else %}Disabled{% endif %}
+                </span>
             </div>
         </div>
         
