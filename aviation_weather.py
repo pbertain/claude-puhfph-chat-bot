@@ -36,7 +36,7 @@ def _format_wind(entry: dict) -> str:
     if wind_dir_val == 0 and wind_speed_val == 0 and wind_gust_val == 0:
         return "CALM"
 
-    dir_str = str(wind_dir_val) if wind_dir_val else "VRB"
+    dir_str = f"{wind_dir_val:03d}"
     if wind_gust is not None:
         return f"{dir_str}@{wind_speed_val}G{wind_gust_val}"
     return f"{dir_str}@{wind_speed_val}"
@@ -114,7 +114,8 @@ def fetch_metars(stations: Iterable[str]) -> list[str]:
     url = f"https://www.fli-rite.net/metars/{','.join(station_list)}"
     resp = requests.get(url, timeout=(10, 20))
     if resp.status_code == 404:
-        return ["AirPuff Weather:  Station not found.  😭🌡️☁️☀️⛈️❄️⚡️🌈"]
+        # Treat as no stations found; return per-station not found lines in order.
+        return [f"{s.upper()}: Station not found.  😭🌡️☁️☀️⛈️❄️⚡️🌈 " for s in station_list]
     resp.raise_for_status()
 
     try:
@@ -130,7 +131,7 @@ def fetch_metars(stations: Iterable[str]) -> list[str]:
         station_id = str(entry.get("station_id", "")).upper() or "UNK"
         flight_category = entry.get("flight_category") or "UNK"
         altim = entry.get("altim_in_hg")
-        altim_str = f"{altim}" if altim is not None else "UNK"
+        altim_str = f"{float(altim):.2f}" if altim is not None else "UNK"
 
         temp_f = _c_to_f(entry.get("temp_c"))
         dewpoint_f = _c_to_f(entry.get("dewpoint_c"))
@@ -147,8 +148,8 @@ def fetch_metars(stations: Iterable[str]) -> list[str]:
         cover, base = _format_ceiling(entry)
 
         results_by_station[station_id] = (
-            f"{station_id}-{flight_category}-{altim_str}-{temp_str}/{dew_str}-"
-            f"{wind_str}-{vis_str}mi-{cover}|{base}ft"
+            f"{station_id}: {flight_category} - {altim_str} - {temp_str}/{dew_str} - "
+            f"{wind_str} - {vis_str}mi - {cover}|{base}ft"
         )
 
     # Preserve request order, then append any extras not requested.
@@ -157,6 +158,8 @@ def fetch_metars(stations: Iterable[str]) -> list[str]:
     for station in requested_upper:
         if station in results_by_station:
             ordered_results.append(results_by_station[station])
+        else:
+            ordered_results.append(f"{station}: Station not found.  😭🌡️☁️☀️⛈️❄️⚡️🌈 ")
 
     for station, line in results_by_station.items():
         if station not in requested_upper:
