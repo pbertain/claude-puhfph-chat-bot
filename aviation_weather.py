@@ -107,7 +107,10 @@ def fetch_metars(stations: Iterable[str]) -> list[str]:
 
         wind_str = _format_wind(entry)
         visibility = entry.get("visibility_statute_mi")
-        vis_str = f"{visibility}" if visibility is not None else "NA"
+        if visibility is None:
+            vis_str = "NA"
+        else:
+            vis_str = f"{float(visibility):.1f}"
 
         cover, base = _format_ceiling(entry)
 
