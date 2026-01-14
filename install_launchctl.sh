@@ -13,6 +13,10 @@ echo "Installing launchctl service..."
 # Create LaunchAgents directory if it doesn't exist
 mkdir -p "$HOME/Library/LaunchAgents"
 
+# Create log files if they don't exist (launchctl requires them to exist)
+touch "$SCRIPT_DIR/bot.log"
+touch "$SCRIPT_DIR/bot_error.log"
+
 # Update the plist file with the correct user path
 # Replace the hardcoded path with the actual script directory
 sed "s|/Users/paulb/Documents/version-control/git/claude-puhfph-chat-bot|$SCRIPT_DIR|g" "$PLIST_SOURCE" > "$PLIST_DEST"
