@@ -152,8 +152,12 @@ def is_aviation_cmd(text: str) -> bool:
     t = normalize_text(text).lower()
     if any(kw in t for kw in AVIATION_KEYWORDS):
         return True
-    # If the message is just a list of station IDs, treat as aviation request
-    if re.fullmatch(r"[a-zA-Z,\s]+", t or "") and re.search(r"\b[a-zA-Z]{4}\b", t):
+    # If the message consists entirely of 4-letter tokens (bare station IDs like
+    # "kdwa" or "kedu kpao" or "kedu,kpao"), treat as aviation request.
+    # All tokens must be exactly 4 letters to avoid false positives on common words
+    # that appear in alarm/reminder commands ("call", "wake", "send", etc.).
+    tokens = [tok for tok in re.split(r"[,\s]+", t.strip()) if tok]
+    if tokens and all(re.fullmatch(r"[a-z]{4}", tok) for tok in tokens):
         return True
     return False
 
@@ -617,26 +621,6 @@ def handle_incoming(msg: message_polling.Incoming) -> None:
         applescript_helpers.send_imessage(msg.handle_id, HELP_TEXT)
         return
 
-    if is_aviation_cmd(msg.text):
-        station_ids = extract_station_ids(msg.text)
-        if not station_ids:
-            applescript_helpers.send_imessage(
-                msg.handle_id,
-                "I couldn't find any 4-letter station IDs. Try: \"metar kdwa\" or \"airport wx kedu,kpao\".",
-            )
-            return
-        try:
-            lines = aviation_weather.fetch_metars(station_ids)
-        except Exception as e:
-            applescript_helpers.send_imessage(msg.handle_id, f"Aviation weather lookup failed: {e}")
-            return
-        if not lines:
-            applescript_helpers.send_imessage(msg.handle_id, "No METAR data returned.")
-            return
-        reply = "AirPuff Weather:\n" + "\n".join(lines)
-        applescript_helpers.send_imessage(msg.handle_id, reply)
-        return
-    
     # Check for name change request (works in any state)
     if is_name_change_cmd(msg.text):
         first, last = extract_name_from_text(msg.text)
@@ -921,6 +905,27 @@ def handle_incoming(msg: message_polling.Incoming) -> None:
             msg.handle_id,
             "Sure! Try: \"schedule metar kedu,kpao at 7am daily\" or \"metar kdwa in 5 mins\".",
         )
+        return
+
+    # Immediate METAR fetch (no schedule intent)
+    if is_aviation_cmd(msg.text):
+        station_ids = extract_station_ids(msg.text)
+        if not station_ids:
+            applescript_helpers.send_imessage(
+                msg.handle_id,
+                "I couldn't find any 4-letter station IDs. Try: \"metar kdwa\" or \"airport wx kedu,kpao\".",
+            )
+            return
+        try:
+            lines = aviation_weather.fetch_metars(station_ids)
+        except Exception as e:
+            applescript_helpers.send_imessage(msg.handle_id, f"Aviation weather lookup failed: {e}")
+            return
+        if not lines:
+            applescript_helpers.send_imessage(msg.handle_id, "No METAR data returned.")
+            return
+        reply = "AirPuff Weather:\n" + "\n".join(lines)
+        applescript_helpers.send_imessage(msg.handle_id, reply)
         return
 
     # Check for scheduler commands (weather)

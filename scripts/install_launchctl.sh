@@ -4,8 +4,9 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 PLIST_NAME="com.claudepuhfph.chatbot.plist"
-PLIST_SOURCE="$SCRIPT_DIR/$PLIST_NAME"
+PLIST_SOURCE="$REPO_DIR/launchd/$PLIST_NAME"
 PLIST_DEST="$HOME/Library/LaunchAgents/$PLIST_NAME"
 
 echo "Installing launchctl service..."
@@ -14,12 +15,12 @@ echo "Installing launchctl service..."
 mkdir -p "$HOME/Library/LaunchAgents"
 
 # Create log files if they don't exist (launchctl requires them to exist)
-touch "$SCRIPT_DIR/bot.log"
-touch "$SCRIPT_DIR/bot_error.log"
+touch "$REPO_DIR/bot.log"
+touch "$REPO_DIR/bot_error.log"
 
 # Update the plist file with the correct user path
-# Replace the hardcoded path with the actual script directory
-sed "s|/Users/claudep/tools/claude-puhfph-chat-bot|$SCRIPT_DIR|g" "$PLIST_SOURCE" > "$PLIST_DEST"
+# Replace the hardcoded path with the actual repo directory
+sed "s|/Users/claude/tools/claude-puhfph-chat-bot|$REPO_DIR|g" "$PLIST_SOURCE" > "$PLIST_DEST"
 
 # Load the service
 launchctl load "$PLIST_DEST"
@@ -29,4 +30,4 @@ echo ""
 echo "To check status: launchctl list | grep claudepuhfph"
 echo "To stop: launchctl unload $PLIST_DEST"
 echo "To start: launchctl load $PLIST_DEST"
-echo "To view logs: tail -f $SCRIPT_DIR/bot.log"
+echo "To view logs: tail -f $REPO_DIR/bot.log"
