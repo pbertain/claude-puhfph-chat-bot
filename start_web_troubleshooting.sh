@@ -8,7 +8,7 @@ cd "$SCRIPT_DIR" || exit 1
 
 # Activate virtual environment
 # First try shared venv, then fall back to local venv
-SHARED_VENV="/Users/claudep/tools/venv/bin/activate"
+SHARED_VENV="$HOME/tools/venv/bin/activate"
 LOCAL_VENV="$SCRIPT_DIR/venv/bin/activate"
 
 # Check if shared venv exists and is readable

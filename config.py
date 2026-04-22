@@ -20,7 +20,7 @@ TROUBLESHOOTING_USER = ""
 TROUBLESHOOTING_PASS = ""
 
 # NWS API settings
-NWS_USER_AGENT = "imessage-autoreply-bot/1.3 (claudep; contact: you@example.com)"
+NWS_USER_AGENT = "imessage-autoreply-bot/1.3 (claude; contact: you@example.com)"
 
 # Welcome back settings
 WELCOME_BACK_GAP_SECONDS = 15 * 60  # 15 minutes
