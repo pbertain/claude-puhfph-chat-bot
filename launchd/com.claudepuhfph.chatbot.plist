@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.claudepuhfph.chatbot.web</string>
+    <string>com.claudepuhfph.chatbot</string>
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>/Users/claude/tools/claude-puhfph-chat-bot/start_web_troubleshooting.sh</string>
+        <string>/Users/claude/tools/claude-puhfph-chat-bot/scripts/start_bot.sh</string>
     </array>
     <key>WorkingDirectory</key>
     <string>/Users/claude/tools/claude-puhfph-chat-bot</string>
@@ -16,9 +16,9 @@
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>/Users/claude/tools/claude-puhfph-chat-bot/web_troubleshooting.log</string>
+    <string>/Users/claude/tools/claude-puhfph-chat-bot/bot.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/claude/tools/claude-puhfph-chat-bot/web_troubleshooting_error.log</string>
+    <string>/Users/claude/tools/claude-puhfph-chat-bot/bot_error.log</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>

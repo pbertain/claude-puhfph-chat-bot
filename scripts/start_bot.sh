@@ -3,7 +3,7 @@
 # Activates virtual environment and runs the iMessage listener bot
 
 # Get the directory where this script is located
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$SCRIPT_DIR" || exit 1
 
 # Activate virtual environment
