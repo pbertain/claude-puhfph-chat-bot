@@ -62,7 +62,14 @@ def run_osascript(script: str, args: list[str]) -> str:
         capture_output=True,
     )
     if p.returncode != 0:
-        raise RuntimeError((p.stderr or "").strip() or "osascript failed")
+        err = (p.stderr or "").strip() or "osascript failed"
+        if "-1743" in err or "not authorized" in err.lower() or "authorization denied" in err.lower():
+            import sys
+            err += (
+                f"\nFix: System Settings > Privacy & Security > Automation"
+                f"\n     Allow {sys.executable} to control Messages and Contacts."
+            )
+        raise RuntimeError(err)
     return (p.stdout or "").strip()
 
 
