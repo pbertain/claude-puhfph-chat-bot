@@ -21,6 +21,12 @@ import scheduler
 app = Flask(__name__)
 
 
+@app.after_request
+def set_server_header(response):
+    response.headers["Server"] = f"Claude/{config.__version__}"
+    return response
+
+
 def _auth_token() -> str:
     """Return the troubleshooting auth token if set."""
     return os.environ.get("TROUBLESHOOTING_TOKEN") or config.TROUBLESHOOTING_TOKEN
