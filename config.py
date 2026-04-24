@@ -4,6 +4,8 @@ Configuration constants and paths.
 """
 import pathlib
 
+__version__ = "1.0.1"
+
 # File paths
 STATE_FILE = pathlib.Path.home() / ".imessage_autoreply_last_rowid"
 CHAT_DB = pathlib.Path.home() / "Library/Messages/chat.db"
@@ -20,7 +22,7 @@ TROUBLESHOOTING_USER = ""
 TROUBLESHOOTING_PASS = ""
 
 # NWS API settings
-NWS_USER_AGENT = "imessage-autoreply-bot/1.3 (claude; contact: you@example.com)"
+NWS_USER_AGENT = f"imessage-autoreply-bot/{__version__} (claude; contact: claude@puhfph.cloud)"
 
 # Welcome back settings
 WELCOME_BACK_GAP_SECONDS = 15 * 60  # 15 minutes
