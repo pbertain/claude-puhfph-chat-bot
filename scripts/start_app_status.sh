@@ -1,6 +1,6 @@
 #!/bin/bash
-# Startup script for web troubleshooting interface
-# Activates virtual environment and runs the web troubleshooting server
+# Startup script for app status interface
+# Activates virtual environment and runs the app status server
 
 # Get the directory where this script is located
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -38,5 +38,5 @@ fi
 
 source "$VENV_PATH"
 
-# Run the web troubleshooting server
-exec python3 web_troubleshooting.py
+# Run the app status server
+exec python3 app_status.py

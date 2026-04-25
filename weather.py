@@ -40,7 +40,7 @@ def wttr_forecast(city: str, state: str = None, country: str = "US", retries: in
                 # Increase timeout: 20 seconds for connect, 30 seconds for read
                 r = requests.get(url, params=params, timeout=(20, 30))
                 r.raise_for_status()
-                result = r.text.strip()
+                result = r.content.decode('utf-8').strip()
                 
                 # If we got a result, return it
                 if result and result != "Unknown location":

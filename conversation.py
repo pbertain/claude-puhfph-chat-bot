@@ -663,6 +663,14 @@ def handle_incoming(msg: message_polling.Incoming) -> None:
 
     if state == "need_last":
         p = database.get_person(msg.handle_id)
+        # Guard: if the user typed a command instead of their name, redirect politely.
+        if is_alarm_cmd(msg.text) or is_weather_cmd(msg.text) or is_help(msg.text):
+            step = "first name" if not p.get("first_name") else "last name"
+            applescript_helpers.send_imessage(
+                msg.handle_id,
+                f"I didn't catch your {step} yet — let me get that first. What's your {step}?"
+            )
+            return
         if not p.get("first_name"):
             first = normalize_text(msg.text)
             database.update_person(msg.handle_id, first_name=first)
