@@ -7,7 +7,7 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>/Users/claude/tools/claude-puhfph-chat-bot/scripts/start_web_troubleshooting.sh</string>
+        <string>/Users/claude/tools/claude-puhfph-chat-bot/scripts/start_app_status.sh</string>
     </array>
     <key>WorkingDirectory</key>
     <string>/Users/claude/tools/claude-puhfph-chat-bot</string>
@@ -16,9 +16,9 @@
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>/Users/claude/tools/claude-puhfph-chat-bot/web_troubleshooting.log</string>
+    <string>/Users/claude/tools/claude-puhfph-chat-bot/app_status.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/claude/tools/claude-puhfph-chat-bot/web_troubleshooting_error.log</string>
+    <string>/Users/claude/tools/claude-puhfph-chat-bot/app_status_error.log</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
