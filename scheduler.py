@@ -19,6 +19,12 @@ METAR_KEYWORDS = {
     "metar", "aviation", "airport wx", "airport weather", "avnwx", "avn wx", "airport",
 }
 
+# Movie keywords for scheduling
+MOVIE_KEYWORDS = {
+    "movie", "movies", "film", "films", "cinema", "theater", "theatre",
+    "showtime", "showtimes", "showing", "playing", "listings",
+}
+
 
 # Timezone abbreviations mapping
 TZ_MAP = {
@@ -256,6 +262,58 @@ def parse_metar_schedule_command(text: str) -> Optional[dict]:
             "time": parsed_time,
             "schedule": schedule,
             "message_type": "metar",
+            "timezone": tz,
+        }
+
+    return None
+
+
+def parse_movie_schedule_command(text: str) -> Optional[dict]:
+    """
+    Parse a movie scheduling command like:
+    - "send me movies at 7pm daily"
+    - "text me movie listings at 7:30pm"
+    - "schedule movies at 7am everyday"
+    - "send me movies in 5 mins"
+    """
+    text = text.strip().lower()
+    if not any(kw in text for kw in MOVIE_KEYWORDS):
+        return None
+
+    # Relative time: "in 5 mins"
+    relative_match = re.search(r'in\s+(\d+\s+(?:minute|min|mins|hour|hr|hrs|hours))', text)
+    if relative_match:
+        delta = parse_relative_time(f"in {relative_match.group(1)}")
+        if delta:
+            return {
+                "relative_delta": delta,
+                "schedule": SCHEDULE_ONCE,
+                "message_type": "movies",
+                "timezone": None,
+            }
+
+    # Absolute time: "... at 7am [daily]"
+    time_match = re.search(
+        r'\bat\s+([\d:]+(?:\s*(?:am|pm))?(?:\s+(?:pt|pst|pdt|mt|mst|mdt|ct|cst|cdt|et|est|edt))?)',
+        text,
+    )
+    if time_match:
+        time_str = time_match.group(1).strip()
+        parsed_time, tz = parse_time(time_str)
+        if not parsed_time:
+            return None
+
+        if "everyday" in text or "daily" in text or "every day" in text:
+            schedule = SCHEDULE_DAILY
+        elif "once" in text:
+            schedule = SCHEDULE_ONCE
+        else:
+            schedule = SCHEDULE_DAILY
+
+        return {
+            "time": parsed_time,
+            "schedule": schedule,
+            "message_type": "movies",
             "timezone": tz,
         }
 

@@ -102,6 +102,8 @@ def main() -> int:
                             schedule["handle_id"],
                             schedule.get("message_payload") or "",
                         )
+                    elif schedule["message_type"] == "movies":
+                        conversation.execute_scheduled_movies(schedule["handle_id"])
                     
                     # Update next run time (or delete if one-time)
                     scheduler.update_next_run(
