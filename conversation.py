@@ -15,6 +15,7 @@ import scheduler
 import weather
 import aviation_weather
 import movies
+import zipcode
 from datetime import time as dt_time
 
 # ------------ greeting ------------
@@ -84,6 +85,7 @@ Other questions:
 • "What do I have scheduled?" or "Show my schedule"
 • "When did we last talk?" or "Last contact"
 • "Set an alarm to wake up" or "Remind me to call mom"
+• "What zip code is Davis, CA?" or "What city is 95616?"
 
 Aviation (METAR) weather:
 • "aviation kdwa" or "metar kdwa"
@@ -130,6 +132,11 @@ MOVIE_KEYWORDS = {"movie", "movies", "film", "films", "cinema", "theater", "thea
 MOVIE_QUESTIONS = {"what movies are playing", "what's playing", "what movies are showing",
                    "what's in theaters", "what's at the movies", "movie times", "movie listings",
                    "what movies", "cinema times", "theater times", "showtimes"}
+
+# ZIP code keywords
+ZIP_KEYWORDS = {"zip", "zip code", "zipcode", "postal code"}
+ZIP_QUESTIONS = {"what zip", "what's the zip", "what is the zip", "zip code for",
+                 "zip for", "what city is", "what city", "lookup zip", "look up zip"}
 
 IN_NOW_RE = re.compile(
     r"""^\s*(?:i'?m|im|i\s+am)\s+in\s+(?P<loc>.+?)(?:\s+now)?\s*[.!?]?\s*$""",
@@ -268,6 +275,91 @@ def is_name_change_cmd(text: str) -> bool:
         return True
     
     return False
+
+
+def is_zip_cmd(text: str) -> bool:
+    """Check if text is asking about ZIP codes or city lookups."""
+    t = normalize_text(text).lower()
+
+    if any(q in t for q in ZIP_QUESTIONS):
+        return True
+
+    has_zip_keyword = any(kw in t for kw in ZIP_KEYWORDS)
+    has_question_word = any(qw in t for qw in ["what", "look", "find", "search", "tell"])
+
+    if has_zip_keyword and has_question_word:
+        return True
+
+    # "what city is 95616" pattern
+    if re.search(r'what\s+city\s+is\s+\d{5}', t):
+        return True
+
+    return False
+
+
+def extract_zip_query(text: str) -> dict:
+    """
+    Extract ZIP code or city/state from a ZIP lookup command.
+    Returns dict with 'zip_code' or 'city'+'state'.
+    """
+    t = normalize_text(text).lower()
+    params = {}
+
+    zip_match = re.search(r'\b(\d{5})\b', t)
+    if zip_match:
+        params["zip_code"] = zip_match.group(1)
+        return params
+
+    loc_patterns = [
+        r'zip\s+(?:code\s+)?(?:for|of|in)\s+(.+?)(?:\?|$)',
+        r'zip\s+(.+?)(?:\?|$)',
+    ]
+    for pattern in loc_patterns:
+        match = re.search(pattern, t)
+        if match:
+            loc = match.group(1).strip().rstrip('.,!?')
+            city_state = geocode.parse_city_state(loc)
+            if city_state[1]:
+                params["city"] = city_state[0]
+                params["state"] = city_state[1]
+            else:
+                params["location_text"] = loc
+            break
+
+    return params
+
+
+def reply_zip(handle_id: str, text: str) -> None:
+    """Handle a ZIP code lookup command and send the result."""
+    params = extract_zip_query(text)
+
+    zip_code = params.get("zip_code")
+    if zip_code:
+        try:
+            data = zipcode.zip_to_city(zip_code)
+            city = data.get("city", "Unknown")
+            state = data.get("state", "")
+            applescript_helpers.send_imessage(handle_id, f"ZIP {zip_code} is {city}, {state}.")
+        except Exception as e:
+            applescript_helpers.send_imessage(handle_id, f"ZIP lookup failed for {zip_code}: {e}")
+        return
+
+    city = params.get("city")
+    state = params.get("state")
+    if city and state:
+        try:
+            zips = zipcode.city_to_zips(city, state)
+            label = f"{city.title()}, {state.upper()}"
+            if len(zips) == 1:
+                applescript_helpers.send_imessage(handle_id, f"ZIP code for {label}: {zips[0]}")
+            else:
+                zip_list = ", ".join(zips)
+                applescript_helpers.send_imessage(handle_id, f"ZIP codes for {label}: {zip_list}")
+        except Exception as e:
+            applescript_helpers.send_imessage(handle_id, f"ZIP lookup failed for {city}, {state}: {e}")
+        return
+
+    applescript_helpers.send_imessage(handle_id, "Try: \"zip code for Davis, CA\" or \"what city is 95616?\"")
 
 
 def is_movie_cmd(text: str) -> bool:
@@ -752,7 +844,7 @@ def handle_incoming(msg: message_polling.Incoming) -> None:
     if state == "need_last":
         p = database.get_person(msg.handle_id)
         # Guard: if the user typed a command instead of their name, redirect politely.
-        if is_alarm_cmd(msg.text) or is_weather_cmd(msg.text) or is_help(msg.text) or is_movie_cmd(msg.text):
+        if is_alarm_cmd(msg.text) or is_weather_cmd(msg.text) or is_help(msg.text) or is_movie_cmd(msg.text) or is_zip_cmd(msg.text):
             step = "first name" if not p.get("first_name") else "last name"
             applescript_helpers.send_imessage(
                 msg.handle_id,
@@ -991,8 +1083,15 @@ def handle_incoming(msg: message_polling.Incoming) -> None:
         city = params.get("city")
         state = params.get("state")
         loc_text = params.get("location_text")
+        if city and state:
+            try:
+                zips = zipcode.city_to_zips(city, state)
+                reply_movies(msg.handle_id, zip_code=zips[0], radius=radius)
+            except Exception:
+                reply_movies(msg.handle_id, loc_label=f"{city}, {state}", radius=radius)
+            return
         if city:
-            reply_movies(msg.handle_id, loc_label=f"{city}, {state}" if state else city, radius=radius)
+            reply_movies(msg.handle_id, loc_label=city, radius=radius)
             return
         if loc_text:
             try:
@@ -1009,6 +1108,16 @@ def handle_incoming(msg: message_polling.Incoming) -> None:
             first = display_first_name(msg.handle_id)
             applescript_helpers.send_imessage(msg.handle_id, f"I'd love to show you movies, {first}! What city are you in? You can say something like \"Davis, CA\" or \"I'm in Seattle, WA\".")
             return
+        parts = [pt.strip() for pt in loc.split(",")]
+        city = parts[0] if parts else loc
+        state = parts[1] if len(parts) > 1 and len(parts[1]) == 2 else None
+        if city and state:
+            try:
+                zips = zipcode.city_to_zips(city, state)
+                reply_movies(msg.handle_id, zip_code=zips[0], radius=radius)
+                return
+            except Exception:
+                pass
         reply_movies(msg.handle_id, loc_label=loc, radius=radius)
         return
 
@@ -1211,16 +1320,21 @@ def handle_incoming(msg: message_polling.Incoming) -> None:
                 if sched["schedule_time"]:
                     schedule_time = dt_time.fromisoformat(sched["schedule_time"])
                     time_display = schedule_time.strftime("%I:%M %p").lstrip("0")
-                    messages.append(f"\u2022 Daily {type_label} at {time_display} (next: {date_str} at {time_str})")
+                    messages.append(f"• Daily {type_label} at {time_display} (next: {date_str} at {time_str})")
                 else:
-                    messages.append(f"\u2022 Daily {type_label} (next: {date_str} at {time_str})")
+                    messages.append(f"• Daily {type_label} (next: {date_str} at {time_str})")
             else:
-                messages.append(f"\u2022 One-time {type_label} (next: {date_str} at {time_str})")
+                messages.append(f"• One-time {type_label} (next: {date_str} at {time_str})")
         
         response = "Your scheduled messages:\n" + "\n".join(messages)
         applescript_helpers.send_imessage(msg.handle_id, response)
         return
-    
+
+    # Check for ZIP code commands
+    if is_zip_cmd(msg.text):
+        reply_zip(msg.handle_id, msg.text)
+        return
+
     # Unknown message - send friendly response with weather and offer help
     p = database.get_person(msg.handle_id)
     loc = p.get("location_text")
