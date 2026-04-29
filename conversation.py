@@ -14,6 +14,7 @@ import message_polling
 import scheduler
 import weather
 import aviation_weather
+import movies
 from datetime import time as dt_time
 
 # ------------ greeting ------------
@@ -62,6 +63,12 @@ Weather questions:
 • "Tell me the weather" or "Give me a forecast"
 • "What's it like outside?" or "How's it outside?"
 • Or just say "weather" or "wx"
+
+Movie listings:
+• "What movies are playing?" or "What's in theaters?"
+• "Movies in Davis, CA" or "Movies near 95616"
+• "Movies within 20 miles"
+• "Send me movies at 7pm daily"
 
 Location updates:
 • "I'm in Davis, CA now"
@@ -114,8 +121,15 @@ ALARM_PATTERNS = ["set an alarm", "set alarm", "create alarm", "set a reminder",
 
 # Name change keywords
 NAME_CHANGE_KEYWORDS = {"change", "update", "wrong", "correct", "fix", "my name is", "name should be"}
-NAME_CHANGE_PATTERNS = ["change my name", "update my name", "my name is wrong", "fix my name", 
+NAME_CHANGE_PATTERNS = ["change my name", "update my name", "my name is wrong", "fix my name",
                         "correct my name", "my name should be", "update name"]
+
+# Movie keywords
+MOVIE_KEYWORDS = {"movie", "movies", "film", "films", "cinema", "theater", "theatre",
+                  "showtime", "showtimes", "showing", "playing", "listings"}
+MOVIE_QUESTIONS = {"what movies are playing", "what's playing", "what movies are showing",
+                   "what's in theaters", "what's at the movies", "movie times", "movie listings",
+                   "what movies", "cinema times", "theater times", "showtimes"}
 
 IN_NOW_RE = re.compile(
     r"""^\s*(?:i'?m|im|i\s+am)\s+in\s+(?P<loc>.+?)(?:\s+now)?\s*[.!?]?\s*$""",
@@ -254,6 +268,62 @@ def is_name_change_cmd(text: str) -> bool:
         return True
     
     return False
+
+
+def is_movie_cmd(text: str) -> bool:
+    """Check if text is asking about movies/showtimes."""
+    t = normalize_text(text).lower()
+
+    if any(q in t for q in MOVIE_QUESTIONS):
+        return True
+
+    has_movie_keyword = any(kw in t for kw in MOVIE_KEYWORDS)
+    has_question_word = any(qw in t for qw in ["what", "how", "tell", "give", "show", "what's", "what is", "any"])
+
+    if t in {"movies", "showtimes", "movie times", "what's playing"}:
+        return True
+
+    if has_movie_keyword and has_question_word:
+        return True
+
+    return False
+
+
+def extract_movie_params(text: str) -> dict:
+    """
+    Extract zip code, location, and radius from movie commands.
+    Returns dict with optional keys: zip_code, city, state, radius.
+    """
+    t = normalize_text(text).lower()
+    params = {}
+
+    zip_match = re.search(r'\b(\d{5})\b', t)
+    if zip_match:
+        params["zip_code"] = zip_match.group(1)
+
+    radius_match = re.search(r'(?:within|radius)\s+(\d+)\s*(?:mile|miles|mi)', t)
+    if radius_match:
+        params["radius"] = min(int(radius_match.group(1)), 50)
+
+    if "zip_code" not in params:
+        loc_patterns = [
+            r'movies?\s+(?:in|near|for|around)\s+(.+?)(?:\s+within|\s+radius|\s*$)',
+            r"(?:what'?s?\s+)?(?:playing|showing)\s+(?:in|near|at)\s+(.+?)(?:\s+within|\s+radius|\s*$)",
+        ]
+        for pattern in loc_patterns:
+            match = re.search(pattern, t)
+            if match:
+                loc = match.group(1).strip().rstrip('.,!?')
+                if loc and not re.match(r'^\d+\s*(mile|mi)', loc):
+                    city_state = geocode.parse_city_state(loc)
+                    if city_state[1]:
+                        params["city"] = city_state[0]
+                        params["state"] = city_state[1]
+                    else:
+                        params["location_text"] = loc
+                break
+
+    return params
 
 
 def extract_name_from_text(text: str) -> tuple[Optional[str], Optional[str]]:
@@ -563,6 +633,24 @@ def reply_weather(handle_id: str, loc_label: str, lat: float, lon: float, includ
     applescript_helpers.send_imessage(handle_id, message)
 
 
+def reply_movies(handle_id: str, loc_label: str = None, zip_code: str = None, radius: int = 10) -> None:
+    """Send movie showtimes reply. Uses zip_code if provided, else city+state from loc_label."""
+    city = None
+    state = None
+    if loc_label:
+        parts = [p.strip() for p in loc_label.split(",")]
+        city = parts[0] if parts else loc_label
+        state = parts[1] if len(parts) > 1 and len(parts[1]) == 2 else None
+
+    try:
+        result = movies.movie_showtimes(city=city, state=state, zip_code=zip_code, radius=radius)
+    except Exception as e:
+        applescript_helpers.send_imessage(handle_id, f"Movie lookup failed: {e}")
+        return
+
+    applescript_helpers.send_imessage(handle_id, result)
+
+
 def maybe_send_welcome_back(handle_id: str) -> None:
     """Send a welcome back message if appropriate."""
     meta = database.get_convo_meta(handle_id)
@@ -664,7 +752,7 @@ def handle_incoming(msg: message_polling.Incoming) -> None:
     if state == "need_last":
         p = database.get_person(msg.handle_id)
         # Guard: if the user typed a command instead of their name, redirect politely.
-        if is_alarm_cmd(msg.text) or is_weather_cmd(msg.text) or is_help(msg.text):
+        if is_alarm_cmd(msg.text) or is_weather_cmd(msg.text) or is_help(msg.text) or is_movie_cmd(msg.text):
             step = "first name" if not p.get("first_name") else "last name"
             applescript_helpers.send_imessage(
                 msg.handle_id,
@@ -851,6 +939,77 @@ def handle_incoming(msg: message_polling.Incoming) -> None:
             applescript_helpers.send_imessage(msg.handle_id, f"I'd love to give you the weather, {first}! What city are you in? You can say something like \"Davis, CA\" or \"I'm in Seattle, WA\".")
             return
         reply_weather(msg.handle_id, loc, float(lat), float(lon))
+        return
+
+    # Check for movie schedule commands (before instant movie check)
+    movie_schedule_info = scheduler.parse_movie_schedule_command(msg.text)
+    if movie_schedule_info:
+        p = database.get_person(msg.handle_id)
+        loc = p.get("location_text")
+        if not loc:
+            first = display_first_name(msg.handle_id)
+            applescript_helpers.send_imessage(msg.handle_id, f"I'd love to help with that, {first}! First, what city are you in? You can say something like \"Davis, CA\" or \"I'm in Seattle, WA\".")
+            return
+
+        try:
+            if "relative_delta" in movie_schedule_info:
+                scheduler.add_scheduled_message(
+                    msg.handle_id,
+                    movie_schedule_info["message_type"],
+                    schedule_type=movie_schedule_info["schedule"],
+                    relative_delta=movie_schedule_info["relative_delta"],
+                )
+                delta = movie_schedule_info["relative_delta"]
+                minutes = int(delta.total_seconds() / 60)
+                time_desc = f"{minutes} min{'s' if minutes != 1 else ''}"
+                applescript_helpers.send_imessage(msg.handle_id, f"Movie listings will be sent in {time_desc}.")
+            else:
+                scheduler.add_scheduled_message(
+                    msg.handle_id,
+                    movie_schedule_info["message_type"],
+                    schedule_time=movie_schedule_info["time"],
+                    schedule_type=movie_schedule_info["schedule"],
+                    tz_str=movie_schedule_info.get("timezone"),
+                )
+                time_str = movie_schedule_info["time"].strftime("%I:%M %p").lstrip("0")
+                schedule_desc = "daily" if movie_schedule_info["schedule"] == scheduler.SCHEDULE_DAILY else "once"
+                applescript_helpers.send_imessage(msg.handle_id, f"Movie listings scheduled for {time_str} ({schedule_desc}).")
+        except Exception as e:
+            applescript_helpers.send_imessage(msg.handle_id, f"Couldn't schedule movie listings: {e}")
+        return
+
+    # Check for movie commands
+    if is_movie_cmd(msg.text):
+        params = extract_movie_params(msg.text)
+        zip_code = params.get("zip_code")
+        radius = params.get("radius", 10)
+
+        if zip_code:
+            reply_movies(msg.handle_id, zip_code=zip_code, radius=radius)
+            return
+
+        city = params.get("city")
+        state = params.get("state")
+        loc_text = params.get("location_text")
+        if city:
+            reply_movies(msg.handle_id, loc_label=f"{city}, {state}" if state else city, radius=radius)
+            return
+        if loc_text:
+            try:
+                _, _, pretty = geocode.geocode_location(loc_text)
+                reply_movies(msg.handle_id, loc_label=pretty, radius=radius)
+            except Exception as e:
+                applescript_helpers.send_imessage(msg.handle_id, f"Sorry — I couldn't find that location. Try: \"movies in Portland, OR\" or \"movies near 95616\". ({e})")
+            return
+
+        p = database.get_person(msg.handle_id)
+        loc = p.get("location_text")
+        if not loc:
+            database.set_state(msg.handle_id, "need_location")
+            first = display_first_name(msg.handle_id)
+            applescript_helpers.send_imessage(msg.handle_id, f"I'd love to show you movies, {first}! What city are you in? You can say something like \"Davis, CA\" or \"I'm in Seattle, WA\".")
+            return
+        reply_movies(msg.handle_id, loc_label=loc, radius=radius)
         return
 
     # Check for METAR scheduling commands
@@ -1045,15 +1204,18 @@ def handle_incoming(msg: message_polling.Incoming) -> None:
             time_str = local_next.strftime("%I:%M %p").lstrip("0")
             date_str = local_next.strftime("%b %d")
             
+            msg_type = sched.get("message_type", "weather")
+            type_label = {"weather": "weather", "metar": "METAR", "movies": "movies"}.get(msg_type, msg_type)
+
             if sched["schedule_type"] == scheduler.SCHEDULE_DAILY:
                 if sched["schedule_time"]:
                     schedule_time = dt_time.fromisoformat(sched["schedule_time"])
                     time_display = schedule_time.strftime("%I:%M %p").lstrip("0")
-                    messages.append(f"• Daily weather at {time_display} (next: {date_str} at {time_str})")
+                    messages.append(f"\u2022 Daily {type_label} at {time_display} (next: {date_str} at {time_str})")
                 else:
-                    messages.append(f"• Daily weather (next: {date_str} at {time_str})")
+                    messages.append(f"\u2022 Daily {type_label} (next: {date_str} at {time_str})")
             else:
-                messages.append(f"• One-time weather (next: {date_str} at {time_str})")
+                messages.append(f"\u2022 One-time {type_label} (next: {date_str} at {time_str})")
         
         response = "Your scheduled messages:\n" + "\n".join(messages)
         applescript_helpers.send_imessage(msg.handle_id, response)
@@ -1117,6 +1279,15 @@ def execute_scheduled_metar(handle_id: str, payload: str) -> None:
         return
     reply = "AirPuff Weather:\n" + "\n".join(lines)
     applescript_helpers.send_imessage(handle_id, reply)
+
+
+def execute_scheduled_movies(handle_id: str) -> None:
+    """Execute a scheduled movie listings message."""
+    p = database.get_person(handle_id)
+    loc = p.get("location_text")
+    if not loc:
+        return
+    reply_movies(handle_id, loc_label=loc)
 
 
 def execute_alarm(alarm_data: dict) -> None:
