@@ -124,8 +124,13 @@ def db_init() -> None:
               FOREIGN KEY(handle_id) REFERENCES person(handle_id) ON DELETE CASCADE
             );
 
-            CREATE INDEX IF NOT EXISTS idx_alarms_next_run 
+            CREATE INDEX IF NOT EXISTS idx_alarms_next_run
             ON alarms(next_run_at);
+
+            CREATE TABLE IF NOT EXISTS global_meta (
+              key TEXT PRIMARY KEY,
+              value TEXT
+            );
             """
         )
         
@@ -499,6 +504,29 @@ def delete_alarm(alarm_id: int) -> None:
     def _do():
         con = db_connect()
         con.execute("DELETE FROM alarms WHERE alarm_id = ?", (alarm_id,))
+        con.commit()
+        con.close()
+    db_exec(_do)
+
+
+def get_global_meta(key: str) -> str | None:
+    """Get a value from the global_meta table."""
+    def _do():
+        con = db_connect()
+        row = con.execute("SELECT value FROM global_meta WHERE key = ?", (key,)).fetchone()
+        con.close()
+        return row[0] if row else None
+    return db_exec(_do)
+
+
+def set_global_meta(key: str, value: str) -> None:
+    """Set a value in the global_meta table."""
+    def _do():
+        con = db_connect()
+        con.execute(
+            "INSERT OR REPLACE INTO global_meta(key, value) VALUES (?, ?)",
+            (key, value),
+        )
         con.commit()
         con.close()
     db_exec(_do)

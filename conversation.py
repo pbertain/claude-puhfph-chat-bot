@@ -16,6 +16,7 @@ import weather
 import aviation_weather
 import movies
 import zipcode
+import intent
 from datetime import time as dt_time
 
 # ------------ greeting ------------
@@ -1335,6 +1336,12 @@ def handle_incoming(msg: message_polling.Incoming) -> None:
         reply_zip(msg.handle_id, msg.text)
         return
 
+    # LLM fallback — classify intent via Claude Haiku when regex matching fails
+    classified = intent.classify_intent(msg.text)
+    if classified and classified.get("intent") != "unknown":
+        _handle_llm_intent(msg, classified)
+        return
+
     # Unknown message - send friendly response with weather and offer help
     p = database.get_person(msg.handle_id)
     loc = p.get("location_text")
@@ -1366,6 +1373,109 @@ def handle_incoming(msg: message_polling.Incoming) -> None:
     temp_data["awaiting_help_confirm"] = True
     database.set_temp_data(msg.handle_id, temp_data)
     return
+
+
+def _handle_llm_intent(msg, classified: dict) -> None:
+    """Route a message based on LLM-classified intent."""
+    intent_name = classified.get("intent", "unknown")
+
+    if intent_name == "weather":
+        loc = classified.get("location")
+        if loc:
+            try:
+                lat, lon, pretty = geocode.geocode_location(loc)
+                reply_weather(msg.handle_id, pretty, lat, lon)
+            except Exception:
+                applescript_helpers.send_imessage(msg.handle_id, f"Sorry — I couldn't find \"{loc}\". Try: \"weather for Portland, OR\".")
+        else:
+            p = database.get_person(msg.handle_id)
+            loc = p.get("location_text")
+            lat = p.get("lat")
+            lon = p.get("lon")
+            if loc and lat is not None and lon is not None:
+                reply_weather(msg.handle_id, loc, float(lat), float(lon))
+            else:
+                database.set_state(msg.handle_id, "need_location")
+                first = display_first_name(msg.handle_id)
+                applescript_helpers.send_imessage(msg.handle_id, f"I'd love to give you the weather, {first}! What city are you in?")
+
+    elif intent_name == "movies":
+        zip_code = classified.get("zip_code")
+        radius = classified.get("radius", 10)
+        city = classified.get("city")
+        state = classified.get("state")
+        if zip_code:
+            reply_movies(msg.handle_id, zip_code=zip_code, radius=radius)
+        elif city and state:
+            try:
+                zips = zipcode.city_to_zips(city, state)
+                reply_movies(msg.handle_id, zip_code=zips[0], radius=radius)
+            except Exception:
+                reply_movies(msg.handle_id, loc_label=f"{city}, {state}", radius=radius)
+        else:
+            p = database.get_person(msg.handle_id)
+            loc = p.get("location_text")
+            if loc:
+                reply_movies(msg.handle_id, loc_label=loc, radius=radius)
+            else:
+                first = display_first_name(msg.handle_id)
+                applescript_helpers.send_imessage(msg.handle_id, f"I'd love to show you movies, {first}! What city are you in?")
+
+    elif intent_name == "zipcode":
+        reply_zip(msg.handle_id, msg.text)
+
+    elif intent_name == "help":
+        applescript_helpers.send_imessage(msg.handle_id, HELP_TEXT)
+
+    elif intent_name == "last_contact":
+        last_contact = get_last_contact_info(msg.handle_id)
+        if last_contact:
+            _, formatted = last_contact
+            applescript_helpers.send_imessage(msg.handle_id, formatted)
+        else:
+            applescript_helpers.send_imessage(msg.handle_id, "We haven't talked recently enough to show last contact info.")
+
+    elif intent_name == "schedule_query":
+        applescript_helpers.send_imessage(msg.handle_id, "Try asking: \"What do I have scheduled?\"")
+
+    elif intent_name == "location_update":
+        loc = classified.get("location")
+        if loc:
+            try:
+                _, _, pretty = set_location(msg.handle_id, loc)
+                reply_weather(msg.handle_id, pretty, *[float(x) for x in (database.get_person(msg.handle_id).get("lat"), database.get_person(msg.handle_id).get("lon"))])
+            except Exception as e:
+                applescript_helpers.send_imessage(msg.handle_id, f"Sorry — I couldn't find that location. ({e})")
+
+    elif intent_name == "alarm":
+        title = classified.get("title", "")
+        time_str = classified.get("time", "")
+        hint = f" Try: \"remind me to {title} at {time_str}\"" if title and time_str else ""
+        applescript_helpers.send_imessage(msg.handle_id, f"I think you want to set a reminder!{hint} Say it like: \"remind me to call mom at 7pm\"")
+
+    elif intent_name in ("schedule_weather", "schedule_movies"):
+        time_str = classified.get("time", "")
+        what = "weather" if intent_name == "schedule_weather" else "movies"
+        applescript_helpers.send_imessage(msg.handle_id, f"I think you want to schedule {what}! Try: \"send me {what} at {time_str or '7am'} daily\"")
+
+    elif intent_name == "aviation":
+        station_ids = classified.get("station_ids", [])
+        if station_ids:
+            try:
+                lines = aviation_weather.fetch_metars(station_ids)
+                if lines:
+                    reply = "AirPuff Weather:\n" + "\n".join(lines)
+                    applescript_helpers.send_imessage(msg.handle_id, reply)
+                else:
+                    applescript_helpers.send_imessage(msg.handle_id, "No METAR data returned.")
+            except Exception as e:
+                applescript_helpers.send_imessage(msg.handle_id, f"Aviation weather lookup failed: {e}")
+        else:
+            applescript_helpers.send_imessage(msg.handle_id, "Which station IDs? Try: \"metar kdwa\" or \"airport wx kedu,kpao\".")
+
+    else:
+        first = display_first_name(msg.handle_id)
+        applescript_helpers.send_imessage(msg.handle_id, f"Hi {first}! I'm not sure I understand. For help, just ask me for 'Help'.")
 
 
 def execute_scheduled_weather(handle_id: str) -> None:

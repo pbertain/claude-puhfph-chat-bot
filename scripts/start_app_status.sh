@@ -38,5 +38,8 @@ fi
 
 source "$VENV_PATH"
 
+# Load secrets (API keys, etc.)
+[ -f "$HOME/.claude-puhfph-env" ] && source "$HOME/.claude-puhfph-env"
+
 # Run the app status server
 exec python3 app_status.py
