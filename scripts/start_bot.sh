@@ -38,5 +38,8 @@ fi
 
 source "$VENV_PATH"
 
+# Load secrets (API keys, etc.)
+[ -f "$HOME/.claude-puhfph-env" ] && source "$HOME/.claude-puhfph-env"
+
 # Run the bot
 exec python3 imessage-listener.py
